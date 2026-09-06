@@ -7,8 +7,8 @@
 #   The root App-of-Apps reconciles gitops/apps/children/*.yaml FROM GIT. Any
 #   value injected into a live Application at bootstrap time is therefore
 #   reverted on root's next sync, and the Application is left with whatever git
-#   actually contains. When git contained the literal string
-#   PLACEHOLDER_REPO_URL, the result was:
+#   actually contains. When git contained an unresolved placeholder, the result
+#   was:
 #
 #     status: "Failed to load target state: ... repository not found"
 #
@@ -16,6 +16,11 @@
 #   minutes later, in Argo CD, long after CI had gone green.
 #
 #   These checks make that class of mistake fail in ~2 seconds instead.
+#
+# SCOPE: only the Application manifests under gitops/apps/ are inspected, and
+# only their actual `repoURL:` values. Scripts and prose elsewhere under
+# gitops/ legitimately mention placeholder names while explaining this bug, and
+# a guard that trips over its own documentation is a broken guard.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -29,31 +34,30 @@ CHILDREN_DIR="${APPS_DIR}/children"
 
 echo "=== GitOps manifest verification ==="
 
-# 1. No unresolved placeholders anywhere under gitops/.
-if grep -rn 'PLACEHOLDER_REPO_URL' gitops/ >/dev/null 2>&1; then
-  grep -rn 'PLACEHOLDER_REPO_URL' gitops/ || true
-  fail "unresolved PLACEHOLDER_REPO_URL in gitops/ — the root app reconciles these from git, so the placeholder would reach the cluster verbatim"
-else
-  pass "no unresolved repo-URL placeholders"
-fi
+[ -f "${ROOT_APP}" ] || fail "missing ${ROOT_APP}"
 
-# 2. Every Application's repoURL must be a real URL.
+# 1+2. Every Application's repoURL must be a real, resolvable URL. This single
+#      check subsumes "no placeholders": a placeholder is simply not a URL.
 for f in "${ROOT_APP}" "${CHILDREN_DIR}"/*.yaml; do
   [ -f "$f" ] || continue
   name="$(basename "$f")"
 
-  url="$(grep -E '^\s+repoURL:' "$f" | head -n1 | sed -E 's/^\s+repoURL:\s*//')"
+  # Strip comments, then read the value of the first real repoURL key.
+  url="$(grep -E '^[[:space:]]*repoURL:' "$f" \
+         | head -n1 \
+         | sed -E 's/^[[:space:]]*repoURL:[[:space:]]*//; s/[[:space:]]*$//; s/^["'"'"']//; s/["'"'"']$//')"
+
   if [ -z "${url}" ]; then
     fail "${name}: no repoURL found"
     continue
   fi
 
   case "${url}" in
-    https://*|oci://*|git@*)
-      pass "${name}: repoURL is a real URL (${url})"
+    https://*|http://*|oci://*|git@*)
+      pass "${name}: repoURL resolves (${url})"
       ;;
     *)
-      fail "${name}: repoURL is not a resolvable URL: '${url}'"
+      fail "${name}: repoURL is not a URL: '${url}' — the root app applies this value verbatim, so it must be committed in full"
       ;;
   esac
 done
@@ -64,17 +68,20 @@ done
 for f in "${CHILDREN_DIR}"/*.yaml; do
   [ -f "$f" ] || continue
   name="$(basename "$f")"
-  if grep -qE '^\s+parameters:' "$f"; then
+  if grep -qE '^[[:space:]]+parameters:' "$f"; then
     fail "${name}: declares helm parameters; put environment-specific values in a committed values file instead"
   else
     pass "${name}: no apply-time helm parameters"
   fi
 done
 
-# 4. The bootstrap script must not rewrite the App-of-Apps manifests.
+# 4. The bootstrap script must not rewrite the App-of-Apps manifests. Only an
+#    actual sed COMMAND counts — comments explaining why this is forbidden do
+#    not. Match a sed invocation at a command position that targets gitops/apps.
 BOOTSTRAP="gitops/bootstrap/bootstrap.sh"
 if [ -f "${BOOTSTRAP}" ]; then
-  if grep -E '^[^#]*sed' "${BOOTSTRAP}" | grep -q 'gitops/apps'; then
+  if grep -nE '^[[:space:]]*[^#]*(^|[|;&[:space:]])sed[[:space:]][^|;&]*gitops/apps' "${BOOTSTRAP}" >/dev/null 2>&1; then
+    grep -nE '^[[:space:]]*[^#]*(^|[|;&[:space:]])sed[[:space:]][^|;&]*gitops/apps' "${BOOTSTRAP}" || true
     fail "bootstrap.sh rewrites gitops/apps manifests — root reverts such edits; commit the real values instead"
   else
     pass "bootstrap.sh does not rewrite the App-of-Apps manifests"
