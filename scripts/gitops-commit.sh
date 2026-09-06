@@ -7,22 +7,27 @@
 # observes the change and reconciles. If this push does not land, the new image
 # exists in ECR but nothing deploys it.
 #
-# AUTHENTICATION: the default GITHUB_TOKEN is scoped `Contents: read` for this
-# repository, so `git push` fails with 403 ("Permission to ... denied to
-# github-actions[bot]"). The platform pipeline spec has no `permissions:` key to
-# widen it, so the push is authenticated with GITOPS_PUSH_TOKEN, a repo-scoped
-# token stored as a repository secret.
+# AUTHENTICATION — why GIT_ASKPASS and not http.extraheader:
 #
-# NOTE ON THE HEADER: actions/checkout installs its OWN
-# http.https://github.com/.extraheader carrying the read-only GITHUB_TOKEN. A
-# second value would simply be appended (git treats it as multi-valued), and the
-# stale read-only header can win. This script therefore UNSETS the existing
-# header before setting its own, and restores nothing afterwards beyond removing
-# its credential.
+#   The default GITHUB_TOKEN is scoped `Contents: read`, so an unauthenticated
+#   push fails 403. The platform pipeline spec has no `permissions:` key to
+#   widen it, so we supply our own repo-scoped token (GITOPS_PUSH_TOKEN).
 #
-# The token is passed via a header rather than embedded in the remote URL, since
-# a URL-embedded credential is persisted into .git/config and echoed back in the
-# "remote:" lines of git error output.
+#   A previous attempt injected it via
+#       git config --local "http.https://github.com/.extraheader" ...
+#   That FAILED with "could not read Username for 'https://github.com'". Git
+#   parses config keys as section.subsection.variable, and the unquoted dots
+#   inside the URL make it store the value under a different key than the one
+#   git consults when pushing — so the push ran with no credential at all. (It
+#   did successfully remove the checkout action's header, which is why the error
+#   changed from 403 to "no credential".)
+#
+#   GIT_ASKPASS sidesteps config parsing entirely: git EXECUTES the named
+#   program and reads the credential from its stdout. No quoting rules, no
+#   subsections, nothing to mis-parse.
+#
+# The token is passed to the helper through the environment and never appears in
+# a command line, a URL, or .git/config.
 #
 # Required env: REGISTRY, TAG, REPO_NAME, GITHUB_REPOSITORY, BRANCH,
 #               GITOPS_PUSH_TOKEN
@@ -61,21 +66,31 @@ if [ -z "${GITOPS_PUSH_TOKEN:-}" ]; then
   exit 1
 fi
 
-HEADER_KEY='http.https://github.com/.extraheader'
-
-cleanup() {
-  git config --local --unset-all "${HEADER_KEY}" 2>/dev/null || true
-}
+# Credential helper. Git calls this once for "Username" and once for "Password";
+# the prompt text is passed as $1, so we answer based on which is being asked.
+ASKPASS="$(mktemp)"
+cleanup() { rm -f "${ASKPASS}"; }
 trap cleanup EXIT
+chmod 700 "${ASKPASS}"
 
-# Drop the checkout action's read-only header before installing ours.
-git config --local --unset-all "${HEADER_KEY}" 2>/dev/null || true
+cat > "${ASKPASS}" <<'ASKPASS_EOF'
+#!/usr/bin/env bash
+case "$1" in
+  *[Uu]sername*) printf '%s\n' "x-access-token" ;;
+  *[Pp]assword*) printf '%s\n' "${GITOPS_PUSH_TOKEN}" ;;
+  *)             printf '%s\n' "${GITOPS_PUSH_TOKEN}" ;;
+esac
+ASKPASS_EOF
 
-AUTH_VALUE="$(printf 'x-access-token:%s' "${GITOPS_PUSH_TOKEN}" | base64 -w0)"
-git config --local "${HEADER_KEY}" "Authorization: Basic ${AUTH_VALUE}"
-unset AUTH_VALUE
+chmod 700 "${ASKPASS}"
 
 echo "Pushing the GitOps update to ${BRANCH}…"
-git push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
+
+# GIT_TERMINAL_PROMPT=0 turns a credential failure into an immediate error
+# instead of a hang. GITOPS_PUSH_TOKEN must be exported so the helper sees it.
+export GITOPS_PUSH_TOKEN
+GIT_ASKPASS="${ASKPASS}" \
+GIT_TERMINAL_PROMPT=0 \
+  git push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
 
 echo "GitOps update pushed. Argo CD will reconcile shopfast to ${TAG}."
