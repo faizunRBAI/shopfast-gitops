@@ -170,14 +170,19 @@ jobs:
         REGISTRY: ${{ steps.img.outputs.registry }}
         TAG: ${{ steps.img.outputs.sha }}
         REPO_NAME: ${{ secrets.PROJECT_NAME }}
-    - name: Scan image with Trivy
-      uses: aquasecurity/trivy-action@v0.28.0
+    - name: Scan image with Trivy (reporting mode)
+      run: bash scripts/scan-image.sh "${REGISTRY}/${REPO_NAME}-shopfast:${TAG}"
+      env:
+        REGISTRY: ${{ steps.img.outputs.registry }}
+        TAG: ${{ steps.img.outputs.sha }}
+        REPO_NAME: ${{ secrets.PROJECT_NAME }}
+    - name: Upload Trivy image report
+      uses: actions/upload-artifact@v4
       with:
-        image-ref: ${{ steps.img.outputs.registry }}/${{ secrets.PROJECT_NAME }}-shopfast:${{
-          steps.img.outputs.sha }}
-        format: table
-        exit-code: '0'
-        severity: HIGH,CRITICAL
+        name: trivy-image-report
+        path: trivy-image-report.json
+        retention-days: 30
+        if-no-files-found: warn
     - name: "GitOps update \u2014 commit the new image tag"
       run: "python3 scripts/set-image.py \\\n  --values gitops/applications/shopfast/values.yaml\
         \ \\\n  --repository \"${REGISTRY}/${REPO_NAME}-shopfast\" \\\n  --tag \"\
