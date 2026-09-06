@@ -184,6 +184,7 @@ stages:
           REGISTRY: ${{ steps.img.outputs.registry }}
           TAG: ${{ steps.img.outputs.sha }}
           REPO_NAME: ${{ secrets.PROJECT_NAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITOPS_PUSH_TOKEN: ${{ secrets.GITOPS_PUSH_TOKEN }}
           BRANCH: ${{ github.ref_name }}
         run: bash scripts/gitops-commit.sh

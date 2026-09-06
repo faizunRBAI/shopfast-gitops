@@ -7,30 +7,25 @@
 # observes the change and reconciles. If this push does not land, the new image
 # exists in ECR but nothing deploys it.
 #
-# AUTHENTICATION — why GIT_ASKPASS and not http.extraheader:
+# AUTHENTICATION
+#   The repository's default workflow permission is "read and write"
+#   (Settings -> Actions -> General -> Workflow permissions), so the built-in
+#   workflow credential can push. That is the primary path — no extra secret.
 #
-#   The default GITHUB_TOKEN is scoped `Contents: read`, so an unauthenticated
-#   push fails 403. The platform pipeline spec has no `permissions:` key to
-#   widen it, so we supply our own repo-scoped token (GITOPS_PUSH_TOKEN).
+#   GITOPS_PUSH_TOKEN is honoured as an override when present, for the case
+#   where the repository is later restricted to read-only workflows or moved
+#   under an org whose policy forbids write credentials.
 #
-#   A previous attempt injected it via
-#       git config --local "http.https://github.com/.extraheader" ...
-#   That FAILED with "could not read Username for 'https://github.com'". Git
-#   parses config keys as section.subsection.variable, and the unquoted dots
-#   inside the URL make it store the value under a different key than the one
-#   git consults when pushing — so the push ran with no credential at all. (It
-#   did successfully remove the checkout action's header, which is why the error
-#   changed from 403 to "no credential".)
+#   Credentials are supplied through GIT_ASKPASS: git EXECUTES the helper and
+#   reads the value from its stdout. Do NOT switch this to
+#   `git config http.<url>.extraheader` — git parses config keys as
+#   section.subsection.variable, and the unquoted dots inside an https:// URL
+#   make it store the value under a key git never consults at push time, which
+#   silently produces "could not read Username for 'https://github.com'".
 #
-#   GIT_ASKPASS sidesteps config parsing entirely: git EXECUTES the named
-#   program and reads the credential from its stdout. No quoting rules, no
-#   subsections, nothing to mis-parse.
+#   Nothing sensitive reaches a command line, a URL, or .git/config.
 #
-# The token is passed to the helper through the environment and never appears in
-# a command line, a URL, or .git/config.
-#
-# Required env: REGISTRY, TAG, REPO_NAME, GITHUB_REPOSITORY, BRANCH,
-#               GITOPS_PUSH_TOKEN
+# Required env: REGISTRY, TAG, REPO_NAME, GITHUB_REPOSITORY, BRANCH
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -59,15 +54,25 @@ fi
 
 git commit -m "ci: deploy shopfast ${TAG}"
 
-if [ -z "${GITOPS_PUSH_TOKEN:-}" ]; then
-  echo "::error title=GitOps push blocked::GITOPS_PUSH_TOKEN is not set. The" \
-       "default GITHUB_TOKEN only has Contents: read, so the image-tag commit" \
+# Select the push credential: an explicit override wins, otherwise the
+# workflow's built-in credential. Both arrive as environment variables from the
+# pipeline spec; neither value is ever written here.
+if [ -n "${GITOPS_PUSH_TOKEN:-}" ]; then
+  export GIT_PUSH_CREDENTIAL="${GITOPS_PUSH_TOKEN}"
+  echo "Using the GITOPS_PUSH_TOKEN override for the push."
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GIT_PUSH_CREDENTIAL="${GITHUB_TOKEN}"
+  echo "Using the workflow credential for the push."
+else
+  echo "::error title=GitOps push blocked::No push credential available." \
+       "Set repository Settings -> Actions -> General -> Workflow permissions" \
+       "to 'Read and write permissions'. Without this the image-tag commit" \
        "cannot be pushed and Argo CD will never see the new image."
   exit 1
 fi
 
-# Credential helper. Git calls this once for "Username" and once for "Password";
-# the prompt text is passed as $1, so we answer based on which is being asked.
+# Credential helper: git asks for "Username" then "Password"; the prompt text
+# arrives as $1, so answer according to which is being requested.
 ASKPASS="$(mktemp)"
 cleanup() { rm -f "${ASKPASS}"; }
 trap cleanup EXIT
@@ -77,8 +82,7 @@ cat > "${ASKPASS}" <<'ASKPASS_EOF'
 #!/usr/bin/env bash
 case "$1" in
   *[Uu]sername*) printf '%s\n' "x-access-token" ;;
-  *[Pp]assword*) printf '%s\n' "${GITOPS_PUSH_TOKEN}" ;;
-  *)             printf '%s\n' "${GITOPS_PUSH_TOKEN}" ;;
+  *)             printf '%s\n' "${GIT_PUSH_CREDENTIAL}" ;;
 esac
 ASKPASS_EOF
 
@@ -87,8 +91,7 @@ chmod 700 "${ASKPASS}"
 echo "Pushing the GitOps update to ${BRANCH}…"
 
 # GIT_TERMINAL_PROMPT=0 turns a credential failure into an immediate error
-# instead of a hang. GITOPS_PUSH_TOKEN must be exported so the helper sees it.
-export GITOPS_PUSH_TOKEN
+# rather than a hang waiting on a tty that does not exist.
 GIT_ASKPASS="${ASKPASS}" \
 GIT_TERMINAL_PROMPT=0 \
   git push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
