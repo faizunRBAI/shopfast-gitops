@@ -4,8 +4,9 @@
 #
 # Installs the minimum needed for GitOps to take over, then gets out of the way:
 #   1. AWS Load Balancer Controller  (so Ingress -> real public ALB)
-#   2. Argo CD                       (self-managed, HTTPS ingress, authenticated)
-#   3. Root App-of-Apps              (from then on, git is the source of truth)
+#   2. Default StorageClass          (so PVCs bind to the EBS CSI driver)
+#   3. Argo CD                       (self-managed, HTTPS ingress, authenticated)
+#   4. Root App-of-Apps              (from then on, git is the source of truth)
 #
 # Everything else — Argo Rollouts, monitoring, dashboards, ShopFast — is created
 # by Argo CD from gitops/apps/children/. This script never installs them directly.
@@ -14,15 +15,13 @@
 #   This script must NEVER modify a field of an Application that the root
 #   App-of-Apps also reconciles from git. Root renders the children from the
 #   repository, so anything injected into the live object here is reverted on
-#   root's next sync. The Application is then left pointing at whatever git
-#   says, which — if git held a placeholder — does not resolve at all:
-#
-#     kubectl -n argocd get application shopfast -o jsonpath={.spec.source.repoURL}
-#     PLACEHOLDER_REPO_URL
-#     status: "Failed to load target state: ... repository not found"
+#   root's next sync, leaving the Application with whatever git actually says.
+#   When git held an unresolved placeholder, every child reported
+#   "repository not found" and no workload was ever created.
 #
 #   So the manifests under gitops/apps/ carry their REAL values, committed.
-#   Nothing is substituted at apply time, and this script only applies them.
+#   Nothing is substituted at apply time; this script only applies them.
+#   scripts/verify-gitops-manifests.sh enforces that in the security stage.
 #
 #   Environment-specific values for the ShopFast chart (image tag, ACM
 #   certificate ARN) live in gitops/applications/shopfast/values.yaml, written
@@ -60,17 +59,6 @@ READY_NODES="$(kubectl get nodes --no-headers -o custom-columns=S:.status.condit
 [ "${READY_NODES}" -gt 0 ] || die "no Ready nodes — the node group has not joined the cluster"
 log "${READY_NODES} node(s) Ready"
 
-# The App-of-Apps manifests must be fully resolved in git. A leftover
-# placeholder would produce an Application that cannot read its own source, and
-# the symptom ("repository not found") appears minutes later in Argo CD rather
-# than here — so fail fast and say exactly what is wrong.
-log "Checking the GitOps manifests are fully resolved"
-if grep -rq 'PLACEHOLDER_REPO_URL' gitops/apps/; then
-  grep -rn 'PLACEHOLDER_REPO_URL' gitops/apps/ || true
-  die "gitops/apps/ still contains PLACEHOLDER_REPO_URL. Commit the real repository URL: the root App-of-Apps reconciles these files from git, so an apply-time substitution here would be reverted."
-fi
-log "No unresolved placeholders"
-
 # ---------------------------------------------------------------------------
 # 1. AWS Load Balancer Controller
 # ---------------------------------------------------------------------------
@@ -105,7 +93,33 @@ helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-contro
 kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=5m
 
 # ---------------------------------------------------------------------------
-# 2. Argo CD
+# 2. Default StorageClass
+# ---------------------------------------------------------------------------
+# EKS's built-in gp2 class is not marked default, so a PVC that does not name a
+# storageClassName binds to nothing and its pod stays Pending forever with
+# "unbound immediate PersistentVolumeClaims". Grafana and VictoriaMetrics both
+# request storage without naming a class. This must be applied BEFORE Argo CD
+# syncs the monitoring stack.
+log "Applying the default gp3 StorageClass (EBS CSI)"
+kubectl apply -f gitops/bootstrap/storageclass.yaml
+
+# Exactly one class may be default. If the legacy gp2 class is also marked
+# default, Kubernetes picks arbitrarily between them.
+if [ "$(kubectl get storageclass gp2 \
+          -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}' \
+          2>/dev/null)" = "true" ]; then
+  kubectl annotate storageclass gp2 \
+    storageclass.kubernetes.io/is-default-class=false --overwrite
+  log "Cleared the default flag on the legacy gp2 StorageClass"
+fi
+
+DEFAULT_SC="$(kubectl get storageclass \
+  -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{" "}{end}' 2>/dev/null || true)"
+log "Default StorageClass: ${DEFAULT_SC:-NONE}"
+[ -n "${DEFAULT_SC}" ] || die "no default StorageClass — PVCs will never bind"
+
+# ---------------------------------------------------------------------------
+# 3. Argo CD
 # ---------------------------------------------------------------------------
 log "Installing Argo CD (${ARGOCD_CHART_VERSION})"
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
@@ -118,7 +132,7 @@ helm repo update argo >/dev/null
 #
 # Substituting here is correct for Argo CD's OWN ingress: this script is the
 # single writer for the argocd helm release, and no Application reconciles it.
-# That is NOT true of the child Applications above.
+# That is NOT true of the child Applications.
 VALUES_FILE="$(mktemp)"
 HASH_FILE="$(mktemp)"
 chmod 600 "${HASH_FILE}"
@@ -156,7 +170,7 @@ helm upgrade --install argocd argo/argo-cd \
 kubectl -n argocd rollout status deploy/argocd-server --timeout=10m
 
 # ---------------------------------------------------------------------------
-# 3. Grafana admin credentials (generated in-cluster, never in git)
+# 4. Grafana admin credentials (generated in-cluster, never in git)
 # ---------------------------------------------------------------------------
 log "Ensuring Grafana admin credentials secret"
 kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
@@ -172,7 +186,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Hand over to GitOps
+# 5. Hand over to GitOps
 # ---------------------------------------------------------------------------
 # The ShopFast chart reads its image tag and certificate ARN from the values
 # file CI commits. Check it is populated so a missing HTTPS listener is

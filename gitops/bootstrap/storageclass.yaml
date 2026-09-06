@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Default StorageClass — gp3 via the EBS CSI driver.
+#
+# WHY THIS EXISTS
+#   EKS ships a `gp2` StorageClass that is NOT marked default and uses the
+#   legacy in-tree provisioner (kubernetes.io/aws-ebs). A PersistentVolumeClaim
+#   that does not name a storageClassName therefore binds to nothing:
+#
+#     kubectl -n monitoring get pvc
+#     NAME          STATUS    ...   STORAGECLASS
+#     vm-grafana    Pending         <none>
+#     vmsingle-vm   Pending         <none>
+#
+#     Warning  FailedScheduling  pod has unbound immediate PersistentVolumeClaims
+#
+#   Terraform installs the aws-ebs-csi-driver addon (infra/eks.tf) with its IRSA
+#   role, so the driver is healthy — it simply had no StorageClass pointing at
+#   it. This supplies one and marks it default, so any chart that requests
+#   storage without naming a class (Grafana, VictoriaMetrics) provisions EBS
+#   volumes normally.
+#
+#   gp3 over gp2: same durability, better baseline IOPS/throughput, ~20% cheaper.
+#
+#   WaitForFirstConsumer delays volume creation until the pod is scheduled, so
+#   the EBS volume is created in the same availability zone as the node that
+#   will mount it. With Immediate binding on a multi-AZ node group the volume
+#   can land in an AZ with no schedulable node and the pod stays Pending.
+# ---------------------------------------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  encrypted: "true"
