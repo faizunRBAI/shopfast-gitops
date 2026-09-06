@@ -58,6 +58,16 @@ spec:
 
         vmalert:
           enabled: true
+          spec:
+            extraArgs:
+              # Alertmanager is intentionally disabled at Tier 1: recording and
+              # alerting RULES are still evaluated and visible in Grafana, but
+              # there is no notification receiver to route them to. The chart
+              # refuses to render vmalert without a notifier target, so this
+              # declares the "no receiver" case explicitly rather than leaving
+              # the whole monitoring Application unable to generate manifests.
+              # Enable alertmanager and drop this flag to start routing alerts.
+              notifier.blackhole: "true"
 
         alertmanager:
           enabled: false

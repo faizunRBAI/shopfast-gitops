@@ -4,6 +4,12 @@
 # This is the ONLY Application applied by the bootstrap script. It watches
 # gitops/apps/children/ and creates every other Application from git, so after
 # bootstrap the cluster's entire desired state is defined by this repository.
+#
+# repoURL is committed literally, exactly as in the children. The root is the
+# one object nothing else reconciles, so a placeholder here would "work" — but
+# keeping every Application consistent means there is a single, obvious place
+# to change if the repository ever moves, and no apply-time substitution step
+# that can silently disagree with git.
 # ---------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -15,7 +21,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: PLACEHOLDER_REPO_URL
+    repoURL: https://github.com/faizunRBAI/shopfast-gitops.git
     targetRevision: main
     path: gitops/apps/children
   destination:

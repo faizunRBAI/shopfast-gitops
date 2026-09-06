@@ -57,6 +57,8 @@ stages:
           done
       - name: Verify Blue/Green and Canary never render a Deployment
         run: bash scripts/verify-chart-exclusivity.sh
+      - name: Verify the GitOps manifests are fully resolved
+        run: bash scripts/verify-gitops-manifests.sh
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -136,6 +138,11 @@ stages:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
       - name: Build jar
         working-directory: application
         run: mvn -B -ntp -DskipTests package
@@ -145,6 +152,15 @@ stages:
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           echo "registry=${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com" >> "$GITHUB_OUTPUT"
           echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Read the ACM certificate ARN from terraform state
+        id: tf
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+          echo "cert=$(terraform output -raw acm_certificate_arn)" >> "$GITHUB_OUTPUT"
       - name: Login to ECR
         run: |
           aws ecr get-login-password --region us-east-1 \
@@ -179,13 +195,13 @@ stages:
           path: trivy-image-report.json
           retention-days: 30
           if-no-files-found: warn
-      - name: GitOps update — commit the new image tag
+      - name: GitOps update — commit the image tag and certificate ARN
         env:
           REGISTRY: ${{ steps.img.outputs.registry }}
           TAG: ${{ steps.img.outputs.sha }}
           REPO_NAME: ${{ secrets.PROJECT_NAME }}
+          CERT_ARN: ${{ steps.tf.outputs.cert }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITOPS_PUSH_TOKEN: ${{ secrets.GITOPS_PUSH_TOKEN }}
           BRANCH: ${{ github.ref_name }}
         run: bash scripts/gitops-commit.sh
 
@@ -199,7 +215,6 @@ stages:
       AWS_REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
       ARGOCD_ADMIN_PASSWORD: ${{ secrets.ARGOCD_ADMIN_PASSWORD }}
-      GITOPS_REPO_URL: ${{ secrets.GITOPS_REPO_URL }}
       ARGOCD_HOSTNAME: argocd.shopfast.royalbengal.xyz
     steps:
       - name: Set up Terraform
@@ -216,7 +231,18 @@ stages:
         with:
           version: v3.16.2
       - name: Install python dependencies for bootstrap
-        run: python3 -m pip install --quiet bcrypt PyYAML
+        run: python3 -m pip install --quiet bcrypt
+      - name: Check out the branch tip so the GitOps commit is present
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          # build_push committed the desired state (image tag + certificate ARN)
+          # to the branch. The default checkout pinned this job to the ORIGINAL
+          # SHA, so without this fetch the bootstrap would read a stale values
+          # file and its ARN precondition check would report a false warning.
+          git fetch origin "${BRANCH}"
+          git checkout "origin/${BRANCH}" -- gitops/applications/shopfast/values.yaml
+          echo "ShopFast desired state refreshed from origin/${BRANCH}."
       - name: Read cluster identity from terraform state
         id: tf
         working-directory: infra

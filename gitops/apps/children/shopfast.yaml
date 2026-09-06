@@ -2,8 +2,15 @@
 #
 # Chart lives in application/helm/shopfast; the DEPLOYED values live in
 # gitops/applications/shopfast/values.yaml and are rewritten by CI with the
-# immutable Git SHA image tag. Both come from the same monorepo, so a single
-# `source` with an explicit valueFiles path is enough (no multi-source needed).
+# immutable Git SHA image tag and the ACM certificate ARN. Both come from the
+# same monorepo, so a single `source` with an explicit valueFiles path is
+# enough (no multi-source needed).
+#
+# repoURL IS COMMITTED LITERALLY — never a placeholder substituted at apply
+# time. The root App-of-Apps reconciles this file FROM GIT, so any value
+# injected into the live object by the bootstrap script is reverted on the next
+# sync: the Application then points at a URL that does not resolve and reports
+# "repository not found" with its workload never created.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -17,7 +24,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: PLACEHOLDER_REPO_URL
+    repoURL: https://github.com/faizunRBAI/shopfast-gitops.git
     targetRevision: main
     path: application/helm/shopfast
     helm:

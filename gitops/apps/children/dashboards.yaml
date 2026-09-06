@@ -1,6 +1,10 @@
 # Grafana dashboards as ConfigMaps, discovered by the Grafana sidecar via the
 # grafana_dashboard=1 label. Managed through GitOps so a dashboard change is a
 # reviewed commit, not a click in the UI.
+#
+# repoURL is committed literally — see the note in shopfast.yaml. A placeholder
+# substituted at apply time is reverted by the root App-of-Apps on its next
+# sync, leaving this Application unable to resolve its own source.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -14,7 +18,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: PLACEHOLDER_REPO_URL
+    repoURL: https://github.com/faizunRBAI/shopfast-gitops.git
     targetRevision: main
     path: gitops/monitoring/dashboards
   destination:

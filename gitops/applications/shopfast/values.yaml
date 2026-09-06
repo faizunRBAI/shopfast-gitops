@@ -1,12 +1,18 @@
 # ---------------------------------------------------------------------------
 # DEPLOYED STATE — this file is the GitOps source of truth for ShopFast.
 #
-# The `repository` and `tag` lines below are REWRITTEN BY CI (build_push stage)
-# on every successful build. CI commits the change back to this repo; Argo CD
-# then observes the new desired state and drives the rollout.
+# The `image` and `ingress.certificateArn` lines below are REWRITTEN BY CI
+# (build_push stage) on every successful build. CI commits the change back to
+# this repo; Argo CD then observes the new desired state and drives the rollout.
 #
 # CI never talks to the cluster. Changing this file is the only way a new
 # version reaches production.
+#
+# SINGLE WRITER: every environment-specific value the chart needs lives HERE.
+# Nothing may be injected into the shopfast Application object at bootstrap
+# time — the root App-of-Apps reconciles that Application from git, so an
+# apply-time patch becomes a second writer, root reverts it, and the app never
+# leaves OutOfSync.
 #
 # To switch delivery strategy, edit `strategy` and commit:
 #   standard  -> plain Kubernetes Deployment
@@ -19,8 +25,8 @@ strategy: bluegreen
 replicaCount: 3
 
 image:
-  repository: 241533126054.dkr.ecr.us-east-1.amazonaws.com/shopfast-gitops-shopfast
-  tag: "5653e5b"
+  repository: PLACEHOLDER_REGISTRY/shopfast
+  tag: "bootstrap"
   pullPolicy: IfNotPresent
 
 release:
@@ -35,9 +41,10 @@ ingress:
   enabled: true
   className: alb
   host: shopfast.royalbengal.xyz
-  # Populated by the bootstrap script from the ACM certificate ARN in
-  # terraform state. Kept out of git as a literal so the value cannot drift.
-  certificateArn: ""
+  # Written by CI from the ACM certificate ARN in terraform state, then
+  # committed. Empty until the first build_push runs against a provisioned
+  # certificate; the ALB then serves this host over HTTPS.
+  certificateArn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
 
 blueGreen:
   autoPromotionEnabled: false

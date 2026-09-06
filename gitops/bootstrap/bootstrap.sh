@@ -10,6 +10,25 @@
 # Everything else — Argo Rollouts, monitoring, dashboards, ShopFast — is created
 # by Argo CD from gitops/apps/children/. This script never installs them directly.
 #
+# SINGLE WRITER RULE — the hard lesson of this project
+#   This script must NEVER modify a field of an Application that the root
+#   App-of-Apps also reconciles from git. Root renders the children from the
+#   repository, so anything injected into the live object here is reverted on
+#   root's next sync. The Application is then left pointing at whatever git
+#   says, which — if git held a placeholder — does not resolve at all:
+#
+#     kubectl -n argocd get application shopfast -o jsonpath={.spec.source.repoURL}
+#     PLACEHOLDER_REPO_URL
+#     status: "Failed to load target state: ... repository not found"
+#
+#   So the manifests under gitops/apps/ carry their REAL values, committed.
+#   Nothing is substituted at apply time, and this script only applies them.
+#
+#   Environment-specific values for the ShopFast chart (image tag, ACM
+#   certificate ARN) live in gitops/applications/shopfast/values.yaml, written
+#   by CI in the build_push stage and committed — the one place both root and
+#   child read from.
+#
 # CREDENTIAL HANDLING: no credential value is ever assigned to a shell variable,
 # written to a file inside the repo, or echoed. Values move from the CI
 # environment straight into stdin of the tool that consumes them.
@@ -25,7 +44,6 @@ die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
 : "${AWS_REGION:?AWS_REGION must be set}"
 : "${ARGOCD_HOSTNAME:?ARGOCD_HOSTNAME must be set}"
 : "${ARGOCD_ADMIN_PASSWORD:?ARGOCD_ADMIN_PASSWORD must be set}"
-: "${GITOPS_REPO_URL:?GITOPS_REPO_URL must be set}"
 : "${CERT_ARN:?CERT_ARN must be set}"
 
 ARGOCD_CHART_VERSION="7.7.11"
@@ -41,6 +59,17 @@ kubectl get nodes -o wide
 READY_NODES="$(kubectl get nodes --no-headers -o custom-columns=S:.status.conditions[-1].type 2>/dev/null | grep -c '^Ready$' || true)"
 [ "${READY_NODES}" -gt 0 ] || die "no Ready nodes — the node group has not joined the cluster"
 log "${READY_NODES} node(s) Ready"
+
+# The App-of-Apps manifests must be fully resolved in git. A leftover
+# placeholder would produce an Application that cannot read its own source, and
+# the symptom ("repository not found") appears minutes later in Argo CD rather
+# than here — so fail fast and say exactly what is wrong.
+log "Checking the GitOps manifests are fully resolved"
+if grep -rq 'PLACEHOLDER_REPO_URL' gitops/apps/; then
+  grep -rn 'PLACEHOLDER_REPO_URL' gitops/apps/ || true
+  die "gitops/apps/ still contains PLACEHOLDER_REPO_URL. Commit the real repository URL: the root App-of-Apps reconciles these files from git, so an apply-time substitution here would be reverted."
+fi
+log "No unresolved placeholders"
 
 # ---------------------------------------------------------------------------
 # 1. AWS Load Balancer Controller
@@ -86,11 +115,14 @@ helm repo update argo >/dev/null
 
 # Render chart values (hostname + certificate ARN) into a temp file OUTSIDE the
 # repo. This file contains no credentials.
+#
+# Substituting here is correct for Argo CD's OWN ingress: this script is the
+# single writer for the argocd helm release, and no Application reconciles it.
+# That is NOT true of the child Applications above.
 VALUES_FILE="$(mktemp)"
 HASH_FILE="$(mktemp)"
-RENDER_DIR="$(mktemp -d)"
 chmod 600 "${HASH_FILE}"
-cleanup() { rm -f "${VALUES_FILE}" "${HASH_FILE}"; rm -rf "${RENDER_DIR}"; }
+cleanup() { rm -f "${VALUES_FILE}" "${HASH_FILE}"; }
 trap cleanup EXIT
 
 sed -e "s|__ARGOCD_HOSTNAME__|${ARGOCD_HOSTNAME}|g" \
@@ -140,46 +172,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Inject runtime values into the GitOps manifests, then hand over
+# 4. Hand over to GitOps
 # ---------------------------------------------------------------------------
-# The committed manifests carry PLACEHOLDER_REPO_URL and an empty certificateArn
-# so no environment-specific value is hardcoded in git. Both are resolved here,
-# at apply time, from terraform state and CI env.
-log "Rendering GitOps manifests with the resolved repo URL"
-for f in gitops/apps/root-app.yaml gitops/apps/children/*.yaml; do
-  sed "s|PLACEHOLDER_REPO_URL|${GITOPS_REPO_URL}|g" "$f" > "${RENDER_DIR}/$(basename "$f")"
-done
-
-# The ShopFast Application needs the ACM cert ARN for its ingress. Passed as a
-# Helm parameter on the Application so the value stays out of the repo.
-python3 - "${RENDER_DIR}/shopfast.yaml" "${CERT_ARN}" <<'PY'
-import sys, yaml
-path, cert = sys.argv[1], sys.argv[2]
-with open(path) as fh:
-    doc = yaml.safe_load(fh)
-helm = doc["spec"]["source"].setdefault("helm", {})
-params = [p for p in helm.get("parameters", []) if p.get("name") != "ingress.certificateArn"]
-params.append({"name": "ingress.certificateArn", "value": cert})
-helm["parameters"] = params
-with open(path, "w") as fh:
-    yaml.safe_dump(doc, fh, default_flow_style=False, sort_keys=False)
-print(f"injected ingress.certificateArn into {path}")
-PY
+# The ShopFast chart reads its image tag and certificate ARN from the values
+# file CI commits. Check it is populated so a missing HTTPS listener is
+# explained here rather than discovered later on the load balancer.
+SHOPFAST_VALUES="gitops/applications/shopfast/values.yaml"
+if grep -Eq '^[[:space:]]+certificateArn:[[:space:]]*"arn:aws:acm:' "${SHOPFAST_VALUES}"; then
+  log "ShopFast values carry the certificate ARN from git"
+else
+  warn "certificateArn is not set in ${SHOPFAST_VALUES}."
+  warn "The ShopFast ingress will come up without an HTTPS listener until the"
+  warn "build_push stage commits the ARN. This is expected on a first bootstrap."
+fi
 
 log "Applying child Applications"
-for f in "${RENDER_DIR}"/*.yaml; do
-  [ "$(basename "$f")" = "root-app.yaml" ] && continue
+for f in gitops/apps/children/*.yaml; do
   kubectl apply -n argocd -f "$f"
 done
 
 log "Applying the root App-of-Apps (git becomes the source of truth)"
-kubectl apply -n argocd -f "${RENDER_DIR}/root-app.yaml"
+kubectl apply -n argocd -f gitops/apps/root-app.yaml
 
 log "Waiting for the root application to register"
 for _ in $(seq 1 30); do
   kubectl -n argocd get application root >/dev/null 2>&1 && break
   sleep 5
 done
+
+# An Application created by an EARLIER bootstrap may still carry the helm
+# parameters that older revision injected at apply time. Git no longer contains
+# them, so strip them once; from here on nothing re-adds them.
+log "Clearing legacy apply-time helm parameters from the shopfast Application"
+if kubectl -n argocd get application shopfast \
+     -o jsonpath='{.spec.source.helm.parameters}' 2>/dev/null | grep -q 'certificateArn'; then
+  kubectl -n argocd patch application shopfast --type=json \
+    -p '[{"op":"remove","path":"/spec/source/helm/parameters"}]' && \
+    log "Removed the legacy helm parameters"
+else
+  log "No legacy helm parameters present"
+fi
 
 kubectl -n argocd get applications -o wide || true
 
