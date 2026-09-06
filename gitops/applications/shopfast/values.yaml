@@ -25,8 +25,8 @@ strategy: bluegreen
 replicaCount: 3
 
 image:
-  repository: PLACEHOLDER_REGISTRY/shopfast
-  tag: "bootstrap"
+  repository: 241533126054.dkr.ecr.us-east-1.amazonaws.com/shopfast-gitops-shopfast
+  tag: "138f759"
   pullPolicy: IfNotPresent
 
 release:
