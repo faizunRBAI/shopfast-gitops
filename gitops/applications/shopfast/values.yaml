@@ -20,7 +20,7 @@ replicaCount: 3
 
 image:
   repository: 241533126054.dkr.ecr.us-east-1.amazonaws.com/shopfast-gitops-shopfast
-  tag: "a5f608c"
+  tag: "5653e5b"
   pullPolicy: IfNotPresent
 
 release:
