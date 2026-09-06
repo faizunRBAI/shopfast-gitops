@@ -184,17 +184,13 @@ jobs:
         retention-days: 30
         if-no-files-found: warn
     - name: "GitOps update \u2014 commit the new image tag"
-      run: "python3 scripts/set-image.py \\\n  --values gitops/applications/shopfast/values.yaml\
-        \ \\\n  --repository \"${REGISTRY}/${REPO_NAME}-shopfast\" \\\n  --tag \"\
-        ${TAG}\"\ngit config user.name \"github-actions[bot]\"\ngit config user.email\
-        \ \"github-actions[bot]@users.noreply.github.com\"\ngit add gitops/applications/shopfast/values.yaml\n\
-        if git diff --cached --quiet; then\n  echo \"GitOps values already at this\
-        \ revision \u2014 nothing to commit\"\nelse\n  git commit -m \"ci: deploy\
-        \ shopfast ${TAG}\"\n  git push origin \"HEAD:${{ github.ref_name }}\"\nfi\n"
+      run: bash scripts/gitops-commit.sh
       env:
         REGISTRY: ${{ steps.img.outputs.registry }}
         TAG: ${{ steps.img.outputs.sha }}
         REPO_NAME: ${{ secrets.PROJECT_NAME }}
+        GITOPS_PUSH_TOKEN: ${{ secrets.GITOPS_PUSH_TOKEN }}
+        BRANCH: ${{ github.ref_name }}
   configure:
     runs-on: ubuntu-latest
     needs:
