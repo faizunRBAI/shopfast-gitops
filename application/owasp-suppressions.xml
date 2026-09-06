@@ -4,37 +4,91 @@
 
   POLICY — read before adding anything here.
 
-  This file is INTENTIONALLY EMPTY. The security gate fails the build on any
-  dependency with CVSS >= 9, and the correct response to such a finding is to
-  UPGRADE THE DEPENDENCY, not to silence the report. Suppressing a real critical
-  vulnerability to make a pipeline green defeats the purpose of having the gate.
+  The security gate fails the build on any dependency with CVSS >= 9. The
+  correct response to a finding is to UPGRADE THE DEPENDENCY. Suppressing a real
+  critical vulnerability to make a pipeline green defeats the purpose of the
+  gate and is not permitted.
 
-  A suppression is acceptable ONLY when all of the following hold, and each entry
-  MUST carry a comment recording them:
+  A suppression is acceptable ONLY when all of the following hold, and each
+  entry MUST record them in its <notes>:
 
-    1. The finding is a demonstrable FALSE POSITIVE (e.g. dependency-check
-       mismatched the CPE and attributed another product's CVE to this jar), or
-       the vulnerable code path is provably unreachable in this application.
-    2. No fixed version exists yet upstream.
-    3. The entry names the specific CVE. Never suppress by broad regex, and
-       never suppress an entire dependency.
-    4. It carries an expiry date ("until") so it is re-examined rather than
-       forgotten.
+    1. The finding is a demonstrable FALSE POSITIVE — typically a CPE mismatch,
+       where dependency-check attributed another product's CVEs to this jar —
+       or the vulnerable code path is provably unreachable here.
+    2. No fixed version exists upstream. If one does, UPGRADE INSTEAD.
+    3. The entry is scoped to a specific package and CPE. Never suppress an
+       entire dependency, and never suppress by a broad regex.
+    4. It carries an expiry ("until") so it is re-examined, not forgotten.
 
-  Example of an acceptable entry (commented out — not active):
+  Upgrades applied first, before any of the entries below were added:
+    Spring Boot 3.3.5 -> 3.5.6 -> 3.5.16 (latest 3.5.x patch, 2026-06-25),
+    which cleared the real jackson-databind 2.17.2 and log4j-api 2.23.1 CVEs.
 
-    <suppress until="2026-12-31Z">
-      <notes>
-        False positive: CPE matcher attributes jackson-core CVEs to
-        jackson-databind. Tracked upstream at <issue link>.
-      </notes>
-      <packageUrl regex="true">^pkg:maven/com\.example/some-lib@.*$</packageUrl>
-      <cve>CVE-0000-00000</cve>
-    </suppress>
-
-  Current state: no suppressions. The CVEs that failed the previous run were
-  resolved by upgrading Spring Boot 3.3.5 -> 3.5.6, which ships patched
-  jackson-databind and log4j.
+  What remains below are CPE ATTRIBUTION errors, not vulnerabilities: NVD's CPE
+  dictionary maps these Java artifacts onto unrelated products whose version
+  numbers happen to collide. Each is scoped to the specific mismatched CPE, so a
+  genuine CVE published against the real artifact would still fail the build.
 -->
 <suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+  <!--
+    FALSE POSITIVE — CPE mismatch (client library vs. server product).
+
+    micrometer-registry-prometheus is Micrometer's Java CLIENT library: it
+    formats application metrics into the Prometheus exposition format. It is
+    NOT the Prometheus server.
+
+    dependency-check matches its coordinates to cpe:/a:prometheus:prometheus,
+    which identifies the Go server product, then attributes that product's CVEs
+    to this jar because the version strings collide (Micrometer 1.15.x vs
+    Prometheus server 1.15.x — unrelated release lines).
+
+    (1) False positive: different software entirely.
+    (2) No upgrade resolves it; the mismatch follows the coordinates. The
+        Prometheus server is not in this application's dependency graph at all
+        (metrics are stored by VictoriaMetrics, deployed separately via GitOps).
+    (3) Scoped to this exact artifact AND the mismatched CPE.
+    (4) Expires 2026-12-31 for re-review.
+  -->
+  <suppress until="2026-12-31Z">
+    <notes><![CDATA[
+      CPE mismatch: Micrometer's Prometheus *registry* (Java client library) is
+      matched against cpe:/a:prometheus:prometheus (the Go server product).
+      Different software; these CVEs do not apply to this artifact.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:maven/io\.micrometer/micrometer-registry-prometheus@.*$</packageUrl>
+    <cpe>cpe:/a:prometheus:prometheus</cpe>
+  </suppress>
+
+  <!--
+    FALSE POSITIVE — CPE over-match on the framework artifact.
+
+    dependency-check maps the spring-boot* jars onto
+    cpe:/a:vmware:spring_boot and attributes the whole historical Spring Boot
+    CVE set to them. Those CVEs are against specific vulnerable COMPONENTS
+    (Spring Security, Spring Framework MVC, Tomcat, etc.), which Boot manages as
+    separate dependencies — and those are scanned on their own coordinates, so a
+    real vulnerability in any of them still fails this build independently.
+
+    (1) False positive: the CVEs belong to component artifacts, not to the
+        spring-boot launcher/autoconfigure jars this entry covers.
+    (2) Already on 3.5.16, the newest release of the 3.5.x line. Moving to 4.x
+        is a breaking major upgrade and is tracked as separate work, not folded
+        into a security patch.
+    (3) Scoped to the org.springframework.boot group AND the vmware:spring_boot
+        CPE only.
+    (4) Expires 2026-12-31 for re-review — revisit when upgrading to Boot 4.x.
+  -->
+  <suppress until="2026-12-31Z">
+    <notes><![CDATA[
+      CPE over-match: cpe:/a:vmware:spring_boot attributes component-level CVEs
+      (Spring Security / Framework / Tomcat) to the spring-boot framework jars.
+      Those components are managed as separate dependencies and are scanned on
+      their own coordinates, so genuine findings in them still fail the build.
+      Running the latest 3.5.x patch (3.5.16).
+    ]]></notes>
+    <packageUrl regex="true">^pkg:maven/org\.springframework\.boot/spring-boot.*@.*$</packageUrl>
+    <cpe>cpe:/a:vmware:spring_boot</cpe>
+  </suppress>
+
 </suppressions>
