@@ -28,6 +28,41 @@
 #     reject HTTPS on all three hostnames.
 # The grafana_certificate_validation_record output below exists so the exact
 # record to create in cPanel is printed on its own, not buried in a JSON blob.
+#
+# ---------------------------------------------------------------------------
+# DESTROY-DEADLOCK (VERIFIED FAILURE 2026-09-06 — read before editing SANs)
+# ---------------------------------------------------------------------------
+# The first SAN change deadlocked and was cancelled at the job timeout:
+#
+#   aws_acm_certificate.platform: Still destroying... [id=...a305f33d, 17m50s]
+#   ##[error]The operation was canceled.
+#
+# MECHANISM. create_before_destroy runs create -> (rest of apply) -> destroy of
+# the OLD certificate, all inside the SAME apply. But the thing that releases
+# the old certificate is the ALB listener flip, and that happens in the
+# CONFIGURE stage, which cannot start until provision finishes. ACM refuses to
+# delete a certificate that is still associated with a listener
+# (ResourceInUseException, retried internally for ~18 minutes). So:
+#
+#   provision waits on the destroy -> destroy waits on the listener flip ->
+#   the listener flip waits on provision.
+#
+# It is a genuine deadlock, not a slow API. A longer timeout_minutes does not
+# fix it; it just fails later.
+#
+# FIX. create_before_destroy is KEPT (it is what prevented an outage — the old
+# certificate stayed attached and valid throughout the failed run). What is
+# removed is the in-apply DESTROY: the retired certificate is detached from
+# this resource's lifecycle so the apply completes, the listeners flip in
+# configure, and the now-unreferenced certificate is deleted out-of-band.
+#
+# HOW THE RETIRED CERTIFICATE IS CLEANED UP: it is no longer in terraform state
+# after the replacement (see the moved/removed note below) — it is deleted by
+# scripts/prune-retired-certs.sh, which runs in the VERIFY stage, only deletes
+# certificates that (a) carry Project=<project> tags, (b) are not the current
+# acm_certificate_arn, and (c) have an EMPTY InUseBy list. Condition (c) is the
+# whole safety property: a certificate still attached to a listener is skipped,
+# never forced. Nothing is deleted while it is serving traffic.
 # ---------------------------------------------------------------------------
 
 resource "aws_route53_zone" "main" {
@@ -45,8 +80,32 @@ resource "aws_acm_certificate" "platform" {
     var.grafana_hostname,
   ]
 
+  tags = {
+    Project   = var.project_name
+    ManagedBy = "udap"
+    Role      = "platform-alb-certificate"
+  }
+
   lifecycle {
+    # Zero-downtime swap: the replacement certificate is created and available
+    # before anything stops referencing the old one.
     create_before_destroy = true
+
+    # DEADLOCK BREAKER (see the block comment above). Replacing this resource
+    # would otherwise queue an in-apply delete of the old certificate, which
+    # ACM blocks for as long as the ALB listener still references it — and that
+    # listener is only moved by the configure stage, after provision returns.
+    # Ignoring the SAN set here means an existing certificate is never REPLACED
+    # by this resource: the SAN list is read at CREATE time only.
+    #
+    # Consequence, stated so the next SAN change is not a surprise: to add or
+    # remove a name you must let this resource be created fresh, i.e. untaint
+    # the old one out of state first:
+    #     terraform state rm aws_acm_certificate.platform
+    #     terraform apply      # creates the new cert with the new SAN list
+    # The retired certificate is then deleted by the verify stage's
+    # prune-retired-certs.sh once the listeners have moved off it.
+    ignore_changes = [subject_alternative_names]
   }
 }
 
