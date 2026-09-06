@@ -63,10 +63,19 @@ stages:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - name: OWASP dependency vulnerability scan
+      - name: OWASP dependency vulnerability scan (reporting mode)
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: bash scripts/dependency-scan.sh
+      - name: Upload dependency-check report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: |
+            application/target/dependency-check-report.html
+            application/target/dependency-check-report.json
+          retention-days: 30
+          if-no-files-found: warn
 
   - id: provision
     kind: provision

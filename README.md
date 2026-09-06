@@ -41,6 +41,7 @@ cluster — so there is no drift war between two writers.
 ├── application/                    Spring Boot service + its Helm chart
 │   ├── src/                        ShopFast source and tests
 │   ├── pom.xml
+│   ├── owasp-suppressions.xml      CPE-mismatch suppressions (policy documented inside)
 │   ├── Dockerfile                  Multi-stage, non-root, healthcheck
 │   └── helm/shopfast/              ONE chart, three strategies
 │       └── templates/
@@ -51,8 +52,8 @@ cluster — so there is no drift war between two writers.
 │           ├── ingress.yaml        ALB, HTTPS
 │           ├── analysistemplate.yaml
 │           └── servicescrape.yaml
-├── infrastructure/                 Terraform (remote S3 state)
-│   ├── network.tf  eks.tf  ecr.tf  dns.tf  iam_alb.tf  outputs.tf
+├── infra/                          Terraform (remote S3 state)
+│   ├── network.tf  eks.tf  ecr.tf  dns.tf  iam_alb.tf  outputs.tf  variables.tf  versions.tf
 ├── gitops/
 │   ├── bootstrap/                  bootstrap.sh, verify.sh, argocd-values.yaml
 │   ├── apps/
@@ -60,6 +61,10 @@ cluster — so there is no drift war between two writers.
 │   │   └── children/               argo-rollouts, monitoring, dashboards, shopfast
 │   ├── applications/shopfast/      values.yaml ← CI rewrites the image tag here
 │   └── monitoring/dashboards/      Grafana dashboards as ConfigMaps
+├── scripts/
+│   ├── verify-chart-exclusivity.sh Proves Blue/Green & Canary never render a Deployment
+│   ├── dependency-scan.sh          OWASP scan + findings summary
+│   └── set-image.py                The GitOps image-tag bump
 ├── docs/
 │   ├── DNS-CPANEL.md               ← domain setup (read this)
 │   └── ROLLOUTS.md                 promotion / rollback runbook
@@ -105,7 +110,7 @@ One workflow, rendered from `.udap/pipeline.yaml`:
 |---|---|
 | `lint` | `mvn compile` |
 | `test` | `mvn test` — asserts `/api/hello`, `/actuator/health`, `/actuator/prometheus` |
-| `security` | OWASP dependency-check + `helm lint` on **all three strategies** |
+| `security` | `helm lint` on **all three strategies** + chart-exclusivity test + OWASP dependency-check |
 | `provision` | `terraform init/validate/apply`; prints Route 53 nameservers |
 | `build_push` | Build jar → Docker → **ECR with `${GITHUB_SHA::7}`** → Trivy scan → commit new tag into `gitops/` |
 | `configure` | ALB controller → Argo CD (HTTPS ingress) → App-of-Apps handover |
@@ -134,7 +139,7 @@ Set for this project:
 |---|---|
 | `ARGOCD_ADMIN_PASSWORD` | Argo CD `admin` password — bcrypt-hashed at install time, **never committed** |
 | `GITOPS_REPO_URL` | HTTPS URL of this repo, injected into Applications |
-| `NVD_API_KEY` | *(optional)* speeds up OWASP dependency-check |
+| `NVD_API_KEY` | *(optional)* authenticated NVD feed for dependency-check |
 
 No credential is ever written to a file, a manifest, or a log.
 
@@ -183,8 +188,43 @@ See [`docs/ROLLOUTS.md`](docs/ROLLOUTS.md) for promotion and rollback.
 - **Least-privilege pods**: non-root (UID 10001), `readOnlyRootFilesystem`,
   all capabilities dropped, `RuntimeDefault` seccomp, no auto-mounted SA token.
 - **Immutable images** at the registry level; `latest` is refused by the chart.
-- **Supply chain**: OWASP dependency-check (fails on CVSS ≥ 9) + Trivy + ECR scan-on-push.
+- **Supply chain**: OWASP dependency-check + Trivy image scan + ECR scan-on-push.
 - **Argo CD RBAC** defaults to `role:readonly`; TLS terminated at the ALB with ACM.
+
+### ⚠️ Accepted risk — dependency scanning runs in REPORTING mode
+
+**Decision: project owner, 2026-09-06.**
+
+`security.failBuildOnCVSS` in `application/pom.xml` is set to **11** — above the
+maximum CVSS score — so dependency findings **do not fail the build**. The scan
+still runs on every pipeline execution and uploads its full HTML + JSON report as
+a build artifact; the job log prints a HIGH/CRITICAL summary and a warning
+annotation.
+
+**Why:** Spring Boot 3.5.16 (the newest release of its line) ships transitive
+dependencies with unpatched criticals in the HTTP stack:
+
+| Artifact | Findings (CVSS ≥ 9) |
+|---|---|
+| `spring-core` / `spring-web` 6.2.19 | CVE-2026-59313 (9.8), CVE-2026-47892 (9.8), CVE-2026-47891 (9.8), CVE-2026-47890 (9.8), CVE-2026-59283 (9.1) |
+| `tomcat-embed-core` 10.1.55 | CVE-2026-65905 (9.8), CVE-2026-65637 (9.8), + 6 more ≥ 9.0 |
+
+These are **not** false positives — each artifact matches its own correct CPE.
+No upstream version resolves them today, so the choice was between never
+deploying and accepting the risk with the findings kept visible. Reporting mode
+was chosen over suppression precisely because it keeps them auditable.
+
+**Compensating controls remain active:** Trivy image scanning, ECR scan-on-push,
+non-root/read-only pods with all capabilities dropped, and a minimal exposed
+surface (`/api/hello` plus three actuator endpoints).
+
+**Revisit when** upstream ships patched `spring-framework` / `tomcat` versions —
+then set the threshold back to `9` and upgrade. **Re-evaluate before this service
+handles real user data.**
+
+Genuine *false positives* are handled separately and narrowly in
+[`application/owasp-suppressions.xml`](application/owasp-suppressions.xml), which
+documents the four conditions a suppression must satisfy.
 
 ---
 
@@ -192,7 +232,7 @@ See [`docs/ROLLOUTS.md`](docs/ROLLOUTS.md) for promotion and rollback.
 
 | Decision | Rationale |
 |---|---|
-| One chart, template-guarded strategies | `deployment.yaml` renders only for `standard`; a Deployment and Rollout can never coexist and fight over ReplicaSets. Enforced again in `verify.sh`. |
+| One chart, template-guarded strategies | `deployment.yaml` renders only for `standard`; a Deployment and Rollout can never coexist and fight over ReplicaSets. Proven by `scripts/verify-chart-exclusivity.sh` in CI and re-checked in `verify.sh`. |
 | Argo CD is the sole cluster writer | Eliminates CI-vs-GitOps drift. |
 | Shared ALB via `group.name` | One load balancer for Argo CD + ShopFast (~$18/mo saved). |
 | EKS access entries, not `aws-auth` | Declarative, survives cluster recreation. |
@@ -200,6 +240,7 @@ See [`docs/ROLLOUTS.md`](docs/ROLLOUTS.md) for promotion and rollback.
 | Non-blocking ACM validation | Pending DNS delegation cannot hang `terraform apply`. |
 | Manual promotion by default | A first deploy has no metric history to analyse; opt into automation later. |
 | Single NAT gateway | Deliberate cost trade-off; noted as a known limitation. |
+| Dependency scan in reporting mode | See §9 — accepted risk, documented and revisitable. |
 
 **Estimated cost:** ~US$310–340/month (EKS $73 · 3×t3.large ~$190 · NAT ~$33 · ALB ~$18).
 
@@ -223,6 +264,9 @@ kubectl -n monitoring port-forward svc/vm-grafana 3000:80
 
 # Rollout state
 kubectl -n shopfast get rollout shopfast -o wide
+
+# Prove the strategy invariant locally
+bash scripts/verify-chart-exclusivity.sh
 ```
 
 > Grafana is intentionally **not** published on the public ALB — only Argo CD and
@@ -231,6 +275,8 @@ kubectl -n shopfast get rollout shopfast -o wide
 
 ## Known limitations
 
+- **Dependency scanning is in reporting mode** — see §9. Known criticals exist in
+  the Spring/Tomcat HTTP stack with no upstream fix available.
 - `royalbengal.xyz` had no hosted zone at build time; public HTTPS depends on the
   DNS step in `docs/DNS-CPANEL.md`.
 - Single NAT gateway — egress is not HA across AZs.
