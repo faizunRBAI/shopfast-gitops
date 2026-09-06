@@ -4,10 +4,18 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!--
+      Spring Boot 3.5.6 (2025-09-18).
+
+      Upgraded from 3.3.5: that line's managed jackson-databind 2.17.2 and
+      log4j-api 2.23.1 carry CVEs scoring >= 9, which correctly failed the
+      OWASP gate (-DfailBuildOnCVSS=9). The fix is to ship patched transitive
+      dependencies, NOT to suppress the findings or lower the threshold.
+    -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.5</version>
+        <version>3.5.6</version>
         <relativePath/>
     </parent>
 
@@ -20,6 +28,13 @@
     <properties>
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!--
+          dependency-check 12.1.0 (2025-02-16). 10.0.4's embedded H2 schema caps
+          the reference URL column at 1000 chars, so 2026-era CVEs with long
+          Bugzilla query URLs raise "Value too long for column URL" during the
+          NVD feed ingest. 12.x widened the column.
+        -->
+        <dependency-check.version>12.1.0</dependency-check.version>
     </properties>
 
     <dependencies>
@@ -54,6 +69,30 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!--
+              Pinned here so the CI security stage and any local run use the same
+              analyzer version. The stage invokes it via scripts/dependency-scan.sh.
+            -->
+            <plugin>
+                <groupId>org.owasp</groupId>
+                <artifactId>dependency-check-maven</artifactId>
+                <version>${dependency-check.version}</version>
+                <configuration>
+                    <failBuildOnCVSS>9</failBuildOnCVSS>
+                    <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
+                    <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>
+                    <!--
+                      Sonatype OSS Index needs its own account. Without credentials
+                      it logs "Invalid credentials" for every jar and adds nothing;
+                      NVD remains the authoritative source here.
+                    -->
+                    <ossindexAnalyzerEnabled>false</ossindexAnalyzerEnabled>
+                    <suppressionFiles>
+                        <suppressionFile>${project.basedir}/owasp-suppressions.xml</suppressionFile>
+                    </suppressionFiles>
+                </configuration>
             </plugin>
         </plugins>
     </build>

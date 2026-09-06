@@ -13,7 +13,10 @@ COPY src ./src
 RUN mvn -B -ntp -DskipTests package
 
 # --- Runtime stage ---------------------------------------------------------
-FROM eclipse-temurin:21.0.5_11-jre-jammy AS runtime
+# JRE-only (no compiler/toolchain in the shipped image). Pinned to a specific
+# patch so builds are reproducible; kept current because Trivy scans this image
+# for HIGH/CRITICAL CVEs in the build_push stage.
+FROM eclipse-temurin:21.0.8_9-jre-noble AS runtime
 
 # Non-root runtime user (CIS Docker 4.1).
 RUN groupadd --system --gid 10001 shopfast \
