@@ -1,0 +1,44 @@
+spring:
+  application:
+    name: shopfast
+
+server:
+  port: 8080
+  shutdown: graceful
+
+# Release identity is injected by the Helm chart so the running pod can report
+# which revision (and blue/green colour) served the request.
+shopfast:
+  release:
+    color: ${SHOPFAST_RELEASE_COLOR:blue}
+    version: ${SHOPFAST_RELEASE_VERSION:dev}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Exactly the endpoints the platform requires — nothing else is exposed.
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+  metrics:
+    tags:
+      application: shopfast
+      release_color: ${SHOPFAST_RELEASE_COLOR:blue}
+      version: ${SHOPFAST_RELEASE_VERSION:dev}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+logging:
+  level:
+    root: INFO

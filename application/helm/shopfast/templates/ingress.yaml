@@ -1,0 +1,41 @@
+{{- include "shopfast.validate" . }}
+{{- if .Values.ingress.enabled }}
+{{/*
+Public HTTPS entrypoint for ShopFast, served by an internet-facing ALB created
+by the AWS Load Balancer Controller. HTTP is redirected to HTTPS at the ALB.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificateArn | quote }}
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Share one ALB with the Argo CD ingress instead of paying for two.
+    alb.ingress.kubernetes.io/group.name: shopfast-platform
+    alb.ingress.kubernetes.io/group.order: "20"
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "shopfast.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

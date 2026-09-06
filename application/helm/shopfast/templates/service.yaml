@@ -1,0 +1,45 @@
+{{- include "shopfast.validate" . }}
+{{/* Active service: production traffic. Used by all three strategies. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "shopfast.selectorLabels" . | nindent 4 }}
+{{- if or (eq .Values.strategy "bluegreen") (eq .Values.strategy "canary") }}
+---
+{{/*
+Preview/canary service.
+
+Argo Rollouts mutates this Service's selector to target the new ReplicaSet:
+- bluegreen -> it exposes the not-yet-promoted colour for verification
+- canary    -> it targets the canary pods receiving the weighted traffic
+It exists only for rollout strategies; a standard Deployment has no second
+stack to point at.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shopfast.fullname" . }}-preview
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+    shopfast.xyz/role: preview
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "shopfast.selectorLabels" . | nindent 4 }}
+{{- end }}

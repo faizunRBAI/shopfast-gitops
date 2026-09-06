@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-shopfast-deployments
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "ShopFast"
+data:
+  shopfast-deployments.json: |
+    {
+      "title": "ShopFast — Deployments & Rollouts",
+      "uid": "shopfast-deploy",
+      "tags": ["shopfast", "argo-rollouts", "delivery"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "templating": {
+        "list": [
+          { "name": "datasource", "type": "datasource", "query": "prometheus", "current": {} }
+        ]
+      },
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Rollout phase",
+          "description": "1 = the rollout is currently in this phase.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "expr": "rollout_info{namespace=\"shopfast\"}",
+              "legendFormat": "{{name}} / {{phase}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Deployed image tag (per pod)",
+          "description": "Immutable Git SHA currently running.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+          "targets": [
+            {
+              "expr": "count(http_server_requests_seconds_count{application=\"shopfast\"}) by (version)",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Active release colour",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+          "targets": [
+            {
+              "expr": "count(up{application=\"shopfast\"} == 1) by (release_color)",
+              "legendFormat": "{{release_color}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Traffic split by release colour (req/s)",
+          "description": "During a canary rollout this shows the weighted shift; during blue/green it shows the cutover.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+          "targets": [
+            {
+              "expr": "sum(rate(http_server_requests_seconds_count{application=\"shopfast\"}[2m])) by (release_color)",
+              "legendFormat": "{{release_color}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Error rate by version (5xx %)",
+          "description": "The signal that aborts a canary: if the new version's error rate climbs, promotion should stop.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+          "fieldConfig": { "defaults": { "unit": "percent" } },
+          "targets": [
+            {
+              "expr": "100 * sum(rate(http_server_requests_seconds_count{application=\"shopfast\",status=~\"5..\"}[5m])) by (version) / clamp_min(sum(rate(http_server_requests_seconds_count{application=\"shopfast\"}[5m])) by (version), 0.001)",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod replicas (shopfast namespace)",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_status_phase{namespace=\"shopfast\",phase=\"Running\"})",
+              "legendFormat": "running",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(kube_pod_status_phase{namespace=\"shopfast\",phase=\"Pending\"})",
+              "legendFormat": "pending",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Container restarts (shopfast)",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "targets": [
+            {
+              "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"shopfast\"}[15m])) by (pod)",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

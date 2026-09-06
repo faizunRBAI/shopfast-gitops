@@ -1,0 +1,15 @@
+apiVersion: v2
+name: shopfast
+description: |
+  ShopFast delivery chart. One chart, three mutually exclusive rollout
+  strategies: standard (Deployment), bluegreen (Argo Rollout) and canary
+  (Argo Rollout). A Deployment is never rendered alongside a Rollout.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - shopfast
+  - argo-rollouts
+  - gitops
+maintainers:
+  - name: ShopFast Platform Team

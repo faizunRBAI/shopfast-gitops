@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>ShopFast — GitOps Delivery Platform</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            background: radial-gradient(1200px 600px at 50% -10%, #1e3a5f 0%, #0b1220 55%, #070b14 100%);
+            color: #e6edf7;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+        .card {
+            width: 100%;
+            max-width: 720px;
+            background: rgba(17, 25, 40, 0.72);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 18px;
+            padding: 2.5rem;
+            box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+        }
+        h1 { margin: 0 0 .35rem; font-size: 2.1rem; letter-spacing: -0.02em; }
+        .sub { margin: 0 0 1.75rem; color: #93a4bd; font-size: .98rem; }
+        .badge {
+            display: inline-block; padding: .3rem .7rem; border-radius: 999px;
+            font-size: .78rem; font-weight: 600; letter-spacing: .04em;
+            text-transform: uppercase; border: 1px solid transparent;
+        }
+        .badge-blue  { background: rgba(56,139,253,.16); color:#79c0ff; border-color: rgba(56,139,253,.4); }
+        .badge-green { background: rgba(63,185,80,.16);  color:#7ee787; border-color: rgba(63,185,80,.4); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: .9rem; margin-bottom: 1.75rem; }
+        .tile { background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 1rem; }
+        .tile .k { font-size: .74rem; text-transform: uppercase; letter-spacing:.06em; color:#8b9cb6; margin-bottom:.35rem; }
+        .tile .v { font-size: 1.05rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+        a.link { display:block; padding:.8rem 1rem; margin-bottom:.6rem; border-radius:10px;
+                 background: rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08);
+                 color:#e6edf7; text-decoration:none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                 font-size:.92rem; transition: background .15s ease, border-color .15s ease; }
+        a.link:hover { background: rgba(56,139,253,.12); border-color: rgba(56,139,253,.45); }
+        footer { margin-top:1.5rem; color:#6f819b; font-size:.8rem; border-top:1px solid rgba(255,255,255,.08); padding-top:1rem; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>ShopFast</h1>
+    <p class="sub">Spring Boot service delivered by Argo CD &amp; Argo Rollouts on Amazon EKS.</p>
+
+    <div class="grid">
+        <div class="tile">
+            <div class="k">Release colour</div>
+            <div class="v"><span id="color" class="badge badge-blue">loading…</span></div>
+        </div>
+        <div class="tile">
+            <div class="k">Image version</div>
+            <div class="v" id="version">loading…</div>
+        </div>
+        <div class="tile">
+            <div class="k">Health</div>
+            <div class="v" id="health">checking…</div>
+        </div>
+    </div>
+
+    <a class="link" href="/api/hello">GET /api/hello</a>
+    <a class="link" href="/actuator/health">GET /actuator/health</a>
+    <a class="link" href="/actuator/prometheus">GET /actuator/prometheus</a>
+
+    <footer>
+        Immutable image tags (Git SHA) &middot; Blue/Green &amp; Canary via Argo Rollouts &middot; GitOps App-of-Apps
+    </footer>
+</div>
+
+<script>
+    fetch('/api/hello').then(r => r.json()).then(d => {
+        const c = document.getElementById('color');
+        c.textContent = d.releaseColor;
+        c.className = 'badge ' + (d.releaseColor === 'green' ? 'badge-green' : 'badge-blue');
+        document.getElementById('version').textContent = d.version;
+    }).catch(() => {
+        document.getElementById('color').textContent = 'unavailable';
+    });
+
+    fetch('/actuator/health').then(r => r.json()).then(d => {
+        document.getElementById('health').textContent = d.status;
+    }).catch(() => {
+        document.getElementById('health').textContent = 'DOWN';
+    });
+</script>
+</body>
+</html>

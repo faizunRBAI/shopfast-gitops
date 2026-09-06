@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# DEPLOYED STATE — this file is the GitOps source of truth for ShopFast.
+#
+# The `repository` and `tag` lines below are REWRITTEN BY CI (build_push stage)
+# on every successful build. CI commits the change back to this repo; Argo CD
+# then observes the new desired state and drives the rollout.
+#
+# CI never talks to the cluster. Changing this file is the only way a new
+# version reaches production.
+#
+# To switch delivery strategy, edit `strategy` and commit:
+#   standard  -> plain Kubernetes Deployment
+#   bluegreen -> Argo Rollout, manual promotion of the new colour
+#   canary    -> Argo Rollout, weighted progressive traffic shift
+# ---------------------------------------------------------------------------
+
+strategy: bluegreen
+
+replicaCount: 3
+
+image:
+  repository: PLACEHOLDER_REGISTRY/shopfast
+  tag: "bootstrap"
+  pullPolicy: IfNotPresent
+
+release:
+  color: blue
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: alb
+  host: shopfast.royalbengal.xyz
+  # Populated by the bootstrap script from the ACM certificate ARN in
+  # terraform state. Kept out of git as a literal so the value cannot drift.
+  certificateArn: ""
+
+blueGreen:
+  autoPromotionEnabled: false
+  scaleDownDelaySeconds: 30
+  prePromotionAnalysis: false
+
+canary:
+  analysis: false
+  steps:
+    - setWeight: 20
+    - pause: { duration: 60s }
+    - setWeight: 50
+    - pause: { duration: 120s }
+    - setWeight: 80
+    - pause: { duration: 60s }
+
+metrics:
+  serviceScrape:
+    enabled: true

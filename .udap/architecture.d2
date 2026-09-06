@@ -1,0 +1,36 @@
+# udap:meta cloud=aws region=us-east-1 target=eks
+
+user: Developer / End User { shape: person; udap-type: generic.user }
+github: GitHub Monorepo { shape: rectangle; udap-type: generic.app }
+actions: GitHub Actions CI { shape: rectangle; udap-type: generic.app }
+ecr: Amazon ECR { shape: rectangle; udap-type: aws.ecr }
+route53: Route 53 shopfast.royalbengal.xyz { shape: rectangle; udap-type: aws.route53 }
+acm: ACM TLS Certificate { shape: rectangle; udap-type: aws.acm }
+s3state: S3 Terraform State { shape: cylinder; udap-type: aws.s3 }
+vpc: VPC 10.42.0.0/16 us-east-1 {
+  alb: ALB Ingress HTTPS { shape: rectangle; udap-type: aws.alb }
+  natgw: NAT Gateway { shape: rectangle; udap-type: aws.nat }
+  argocd: argocd ns Argo CD Server { shape: rectangle; udap-type: aws.eks }
+  rollouts: argo-rollouts ns Controller { shape: rectangle; udap-type: aws.eks }
+  shopfast: shopfast ns ShopFast Rollout { shape: rectangle; udap-type: aws.eks }
+  monitoring: monitoring ns VictoriaMetrics Grafana { shape: rectangle; udap-type: aws.eks }
+}
+
+user -> github: git push
+github -> actions: workflow dispatch
+actions -> s3state: terraform state
+actions -> ecr: build and push SHA tag
+actions -> github: bump image tag in gitops
+vpc.argocd -> github: poll desired state
+vpc.argocd -> vpc.shopfast: sync app of apps
+vpc.argocd -> vpc.monitoring: sync monitoring
+vpc.argocd -> vpc.rollouts: sync rollouts controller
+vpc.rollouts -> vpc.shopfast: bluegreen and canary steps
+vpc.shopfast -> ecr: pull image
+vpc.shopfast -> vpc.natgw: egress
+user -> route53: https requests
+route53 -> vpc.alb: alias record
+acm -> vpc.alb: tls certificate
+vpc.alb -> vpc.argocd: argocd host
+vpc.alb -> vpc.shopfast: app host
+vpc.monitoring -> vpc.shopfast: scrape prometheus metrics

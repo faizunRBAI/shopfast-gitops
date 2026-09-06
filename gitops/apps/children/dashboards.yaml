@@ -1,0 +1,28 @@
+# Grafana dashboards as ConfigMaps, discovered by the Grafana sidecar via the
+# grafana_dashboard=1 label. Managed through GitOps so a dashboard change is a
+# reviewed commit, not a click in the UI.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dashboards
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # After the monitoring stack (wave 10) so Grafana exists to load them.
+    argocd.argoproj.io/sync-wave: "15"
+spec:
+  project: default
+  source:
+    repoURL: PLACEHOLDER_REPO_URL
+    targetRevision: main
+    path: gitops/monitoring/dashboards
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

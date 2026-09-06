@@ -1,0 +1,109 @@
+# ---------------------------------------------------------------------------
+# Argo CD Helm values (argo-cd chart).
+#
+# __ARGOCD_HOSTNAME__ and __CERT_ARN__ are substituted by bootstrap.sh from
+# terraform outputs / CI env. No secret value appears in this file.
+#
+# Exposure model: argocd-server runs in insecure mode (TLS terminated at the
+# ALB with the ACM certificate) and is published through an internet-facing
+# ALB Ingress. This is what makes the dashboard reachable from anywhere over
+# HTTPS — kubectl port-forward is never required.
+# ---------------------------------------------------------------------------
+
+global:
+  domain: __ARGOCD_HOSTNAME__
+
+configs:
+  params:
+    # TLS is terminated by the ALB; the server speaks plain HTTP behind it.
+    # Without this, the ALB health check and gRPC routing fight the self-signed cert.
+    server.insecure: true
+
+  cm:
+    url: https://__ARGOCD_HOSTNAME__
+    # Keep the built-in admin account enabled — it is the authentication method
+    # for this platform. Swap to SSO/OIDC later without touching the ingress.
+    admin.enabled: true
+    exec.enabled: false
+    # Argo CD manages itself and the platform apps.
+    application.instanceLabelKey: argocd.argoproj.io/instance
+    timeout.reconciliation: 180s
+
+  rbac:
+    # Authenticated users get read-only by default; admin is explicit.
+    policy.default: role:readonly
+    policy.csv: |
+      g, argocd-admins, role:admin
+    scopes: "[groups]"
+
+server:
+  replicas: 2
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    hostname: __ARGOCD_HOSTNAME__
+    path: /
+    pathType: Prefix
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+      alb.ingress.kubernetes.io/backend-protocol: HTTP
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+      alb.ingress.kubernetes.io/success-codes: "200"
+      # Shares one ALB with the ShopFast ingress (same group.name).
+      alb.ingress.kubernetes.io/group.name: shopfast-platform
+      alb.ingress.kubernetes.io/group.order: "10"
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
+repoServer:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+applicationSet:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+dex:
+  # No external identity provider configured; local admin auth is used.
+  enabled: false
+
+notifications:
+  enabled: false

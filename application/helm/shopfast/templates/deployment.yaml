@@ -1,0 +1,32 @@
+{{- include "shopfast.validate" . }}
+{{/*
+============================================================================
+ STANDARD STRATEGY ONLY.
+
+ This Deployment renders ONLY when strategy == "standard". When the strategy
+ is bluegreen or canary, an Argo Rollout owns the pods instead and this file
+ renders nothing at all — a Deployment and a Rollout must never both exist,
+ because both would fight to own the same ReplicaSets.
+============================================================================
+*/}}
+{{- if eq .Values.strategy "standard" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "shopfast.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    {{- include "shopfast.podTemplate" . | nindent 4 }}
+{{- end }}

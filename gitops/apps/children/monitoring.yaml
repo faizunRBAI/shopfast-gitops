@@ -1,0 +1,140 @@
+# Observability stack, managed entirely through GitOps.
+#
+# victoria-metrics-k8s-stack bundles:
+#   - VictoriaMetrics operator + vmsingle (Prometheus-compatible TSDB)
+#   - vmagent (scraping), kube-state-metrics, node-exporter
+#   - Grafana with provisioned datasource
+# It replaces kube-prometheus-stack while keeping the Prometheus query API, so
+# Argo Rollouts AnalysisTemplates and standard dashboards work unchanged.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Before shopfast (wave 20) so VMServiceScrape CRD exists when the app syncs.
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  project: default
+  source:
+    repoURL: https://victoriametrics.github.io/helm-charts
+    chart: victoria-metrics-k8s-stack
+    targetRevision: 0.35.4
+    helm:
+      releaseName: vm
+      values: |
+        fullnameOverride: vm
+
+        victoria-metrics-operator:
+          enabled: true
+
+        vmsingle:
+          enabled: true
+          spec:
+            retentionPeriod: "7d"
+            resources:
+              requests:
+                cpu: 200m
+                memory: 512Mi
+              limits:
+                memory: 2Gi
+            storage:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 20Gi
+
+        vmagent:
+          enabled: true
+          spec:
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 1Gi
+
+        vmalert:
+          enabled: true
+
+        alertmanager:
+          enabled: false
+
+        # Kubernetes-level metrics.
+        kube-state-metrics:
+          enabled: true
+        prometheus-node-exporter:
+          enabled: true
+
+        # Control-plane components EKS does not expose to scrapers.
+        kubeApiServer:
+          enabled: true
+        kubeControllerManager:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeEtcd:
+          enabled: false
+        kubeProxy:
+          enabled: false
+
+        grafana:
+          enabled: true
+          replicas: 1
+          # Admin password is created by the bootstrap script as a k8s secret;
+          # it is never stored in git.
+          admin:
+            existingSecret: grafana-admin-credentials
+            userKey: admin-user
+            passwordKey: admin-password
+          persistence:
+            enabled: true
+            size: 10Gi
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          sidecar:
+            dashboards:
+              enabled: true
+              label: grafana_dashboard
+              labelValue: "1"
+              searchNamespace: ALL
+              folderAnnotation: grafana_folder
+              provider:
+                foldersFromFilesStructure: true
+            datasources:
+              enabled: true
+          grafana.ini:
+            server:
+              root_url: "%(protocol)s://%(domain)s/"
+            auth.anonymous:
+              enabled: false
+            security:
+              cookie_secure: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - Replace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 10m
+  ignoreDifferences:
+    - group: operator.victoriametrics.com
+      kind: VMSingle
+      jsonPointers:
+        - /spec/replicaCount

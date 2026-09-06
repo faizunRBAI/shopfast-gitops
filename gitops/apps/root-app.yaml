@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# APP-OF-APPS ROOT
+#
+# This is the ONLY Application applied by the bootstrap script. It watches
+# gitops/apps/children/ and creates every other Application from git, so after
+# bootstrap the cluster's entire desired state is defined by this repository.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: PLACEHOLDER_REPO_URL
+    targetRevision: main
+    path: gitops/apps/children
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

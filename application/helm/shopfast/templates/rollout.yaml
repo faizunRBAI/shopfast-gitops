@@ -1,0 +1,69 @@
+{{- include "shopfast.validate" . }}
+{{/*
+============================================================================
+ ARGO ROLLOUT — bluegreen and canary ONLY.
+
+ The condition below is an EXPLICIT comparison rather than a helper returning a
+ truthy string: this guard is the platform's most important guarantee, so it is
+ written so that its behaviour is obvious on inspection and cannot be broken by
+ a whitespace-trimming subtlety in a shared helper.
+
+ templates/deployment.yaml carries the exact complementary condition
+ (strategy == "standard"), so exactly one workload object is ever produced.
+ scripts/verify-chart-exclusivity.sh asserts this on real rendered output in CI.
+============================================================================
+*/}}
+{{- if or (eq .Values.strategy "bluegreen") (eq .Values.strategy "canary") }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "shopfast.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "shopfast.podTemplate" . | nindent 4 }}
+  strategy:
+    {{- if eq .Values.strategy "bluegreen" }}
+    blueGreen:
+      # activeService always points at the colour serving production traffic.
+      activeService: {{ include "shopfast.fullname" . }}
+      # previewService exposes the NEW colour for verification before promotion.
+      previewService: {{ include "shopfast.fullname" . }}-preview
+      autoPromotionEnabled: {{ .Values.blueGreen.autoPromotionEnabled }}
+      {{- if and .Values.blueGreen.autoPromotionEnabled .Values.blueGreen.autoPromotionSeconds }}
+      autoPromotionSeconds: {{ .Values.blueGreen.autoPromotionSeconds }}
+      {{- end }}
+      # Keep the old colour alive briefly so rollback is instant.
+      scaleDownDelaySeconds: {{ .Values.blueGreen.scaleDownDelaySeconds }}
+      {{- if .Values.blueGreen.prePromotionAnalysis }}
+      prePromotionAnalysis:
+        templates:
+          - templateName: {{ include "shopfast.fullname" . }}-success-rate
+        args:
+          - name: service-name
+            value: {{ include "shopfast.fullname" . }}-preview
+      {{- end }}
+    {{- end }}
+    {{- if eq .Values.strategy "canary" }}
+    canary:
+      canaryService: {{ include "shopfast.fullname" . }}-preview
+      stableService: {{ include "shopfast.fullname" . }}
+      {{- if .Values.canary.analysis }}
+      analysis:
+        templates:
+          - templateName: {{ include "shopfast.fullname" . }}-success-rate
+        startingStep: 1
+        args:
+          - name: service-name
+            value: {{ include "shopfast.fullname" . }}-preview
+      {{- end }}
+      steps:
+        {{- toYaml .Values.canary.steps | nindent 8 }}
+    {{- end }}
+{{- end }}

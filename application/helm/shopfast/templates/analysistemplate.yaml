@@ -1,0 +1,37 @@
+{{- include "shopfast.validate" . }}
+{{- if or (eq .Values.strategy "bluegreen") (eq .Values.strategy "canary") }}
+{{/*
+AnalysisTemplate used to gate promotion.
+
+Queries VictoriaMetrics (Prometheus-compatible API) for the HTTP success rate
+of the new revision. If the ratio drops below the threshold, Argo Rollouts
+aborts the rollout and traffic stays on the stable revision.
+
+Only wired into the Rollout when blueGreen.prePromotionAnalysis or
+canary.analysis is true; the default is manual promotion, so a first deploy is
+never gated on metrics that have no history yet.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "shopfast.fullname" . }}-success-rate
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: http-success-rate
+      interval: {{ .Values.analysis.intervalSeconds }}s
+      count: {{ .Values.analysis.count }}
+      # Fail the analysis (and abort the rollout) if the ratio drops below this.
+      successCondition: result[0] >= {{ .Values.analysis.successRateThreshold }}
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: {{ .Values.analysis.prometheusAddress | quote }}
+          query: |
+            sum(rate(http_server_requests_seconds_count{application="shopfast",status!~"5.."}[2m]))
+            /
+            sum(rate(http_server_requests_seconds_count{application="shopfast"}[2m]))
+{{- end }}

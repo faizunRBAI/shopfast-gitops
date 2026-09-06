@@ -1,0 +1,25 @@
+{{- include "shopfast.validate" . }}
+{{- if .Values.metrics.serviceScrape.enabled }}
+{{/*
+VMServiceScrape tells the VictoriaMetrics operator to scrape the Spring Boot
+actuator endpoint. The CRD is installed by the monitoring app, so this object
+is applied by Argo CD after the monitoring stack syncs.
+*/}}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "shopfast.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.metrics.serviceScrape.path }}
+      interval: {{ .Values.metrics.serviceScrape.interval }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+{{- end }}

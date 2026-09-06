@@ -1,0 +1,48 @@
+# ShopFast application.
+#
+# Chart lives in application/helm/shopfast; the DEPLOYED values live in
+# gitops/applications/shopfast/values.yaml and are rewritten by CI with the
+# immutable Git SHA image tag. Both come from the same monorepo, so a single
+# `source` with an explicit valueFiles path is enough (no multi-source needed).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shopfast
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Sync after platform components (Rollouts + monitoring CRDs) exist.
+    argocd.argoproj.io/sync-wave: "20"
+spec:
+  project: default
+  source:
+    repoURL: PLACEHOLDER_REPO_URL
+    targetRevision: main
+    path: application/helm/shopfast
+    helm:
+      # Path is relative to the repository root.
+      valueFiles:
+        - ../../../gitops/applications/shopfast/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shopfast
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # Argo Rollouts owns the replica count during a progressive rollout.
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/replicas
