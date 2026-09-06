@@ -18,9 +18,9 @@
 #   These checks make that class of mistake fail in ~2 seconds instead.
 #
 # SCOPE: only the Application manifests under gitops/apps/ are inspected, and
-# only their actual `repoURL:` values. Scripts and prose elsewhere under
-# gitops/ legitimately mention placeholder names while explaining this bug, and
-# a guard that trips over its own documentation is a broken guard.
+# only their actual VALUES. Scripts and prose elsewhere under gitops/
+# legitimately mention placeholder names while explaining this bug, and a guard
+# that trips over its own documentation is a broken guard.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -31,6 +31,8 @@ pass() { printf '\033[1;32m[ ok ]\033[0m %s\n' "$*"; }
 APPS_DIR="gitops/apps"
 ROOT_APP="${APPS_DIR}/root-app.yaml"
 CHILDREN_DIR="${APPS_DIR}/children"
+SHOPFAST_VALUES="gitops/applications/shopfast/values.yaml"
+MONITORING="${CHILDREN_DIR}/monitoring.yaml"
 
 echo "=== GitOps manifest verification ==="
 
@@ -85,6 +87,49 @@ if [ -f "${BOOTSTRAP}" ]; then
     fail "bootstrap.sh rewrites gitops/apps manifests — root reverts such edits; commit the real values instead"
   else
     pass "bootstrap.sh does not rewrite the App-of-Apps manifests"
+  fi
+fi
+
+# 5. ONE CERTIFICATE, MANY CONSUMERS.
+#    argocd, shopfast and grafana are served by a single ACM certificate. Adding
+#    a SAN REPLACES that certificate and mints a new ARN, so every committed
+#    copy must move together. Two files carry it in git:
+#      - gitops/applications/shopfast/values.yaml  (ingress.certificateArn)
+#      - gitops/apps/children/monitoring.yaml      (grafana ingress annotation)
+#    If they disagree, one hostname is pointing at a certificate that is being
+#    retired, and its HTTPS listener breaks on the next reconcile. CI rewrites
+#    both in the same commit (scripts/gitops-commit.sh); this check proves it.
+extract_arn() {
+  grep -oE 'arn:aws:acm:[a-z0-9-]+:[0-9]{12}:certificate/[a-f0-9-]+' "$1" \
+    | head -n1
+}
+
+if [ -f "${SHOPFAST_VALUES}" ] && [ -f "${MONITORING}" ]; then
+  app_arn="$(extract_arn "${SHOPFAST_VALUES}")"
+  graf_arn="$(extract_arn "${MONITORING}")"
+
+  if [ -z "${app_arn}" ] || [ -z "${graf_arn}" ]; then
+    # Before the first successful build_push there is no ARN to compare. That
+    # is a legitimate bootstrap state, not a defect.
+    pass "certificate ARN not yet committed in both files (pre-bootstrap state)"
+  elif [ "${app_arn}" = "${graf_arn}" ]; then
+    pass "shopfast and grafana reference the same certificate ARN"
+  else
+    fail "certificate ARN mismatch — shopfast='${app_arn}' grafana='${graf_arn}'; one hostname will lose HTTPS. Both are rewritten together by scripts/gitops-commit.sh"
+  fi
+fi
+
+# 6. Grafana is deliberately internet-facing, so anonymous access must stay off.
+#    A chart upgrade or a careless edit that flips this exposes every dashboard
+#    and the metrics datasource to the public internet with no login at all.
+if [ -f "${MONITORING}" ]; then
+  if grep -qE '^[[:space:]]*ingress:' "${MONITORING}"; then
+    if grep -A2 -E '^[[:space:]]*auth\.anonymous:' "${MONITORING}" \
+         | grep -qE '^[[:space:]-]*enabled:[[:space:]]*true'; then
+      fail "monitoring.yaml: Grafana is publicly exposed AND auth.anonymous is enabled — this publishes every dashboard without a login"
+    else
+      pass "monitoring.yaml: Grafana anonymous access disabled"
+    fi
   fi
 fi
 

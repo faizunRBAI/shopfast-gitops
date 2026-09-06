@@ -62,3 +62,9 @@ variable "app_hostname" {
   type        = string
   default     = "shopfast.royalbengal.xyz"
 }
+
+variable "grafana_hostname" {
+  description = "Public hostname for the Grafana dashboard. Carried as a SAN on the platform ACM certificate and served by the shared ALB."
+  type        = string
+  default     = "grafana.shopfast.royalbengal.xyz"
+}

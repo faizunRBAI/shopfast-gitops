@@ -54,6 +54,23 @@ output "acm_validation_records" {
   ]
 }
 
+# Isolated so the provision stage can print the ONE record that is new on this
+# change without the operator having to pick it out of the full JSON list.
+# DNS stays on cPanel (no Route 53 delegation), so this record must be created
+# by hand in the cPanel Zone Editor before ACM will issue the certificate.
+output "grafana_certificate_validation_record" {
+  description = "ACTION REQUIRED (cPanel Zone Editor): CNAME that validates the Grafana hostname on the platform certificate."
+  value = one([
+    for dvo in aws_acm_certificate.platform.domain_validation_options :
+    {
+      name  = dvo.resource_record_name
+      type  = dvo.resource_record_type
+      value = dvo.resource_record_value
+    }
+    if dvo.domain_name == var.grafana_hostname
+  ])
+}
+
 output "vpc_id" {
   description = "Platform VPC id."
   value       = aws_vpc.main.id
@@ -77,4 +94,9 @@ output "argocd_hostname" {
 output "app_hostname" {
   description = "Public hostname for the ShopFast application."
   value       = var.app_hostname
+}
+
+output "grafana_hostname" {
+  description = "Public hostname for the Grafana dashboard."
+  value       = var.grafana_hostname
 }

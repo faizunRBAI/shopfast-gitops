@@ -13,6 +13,21 @@
 # is pending. The certificate + validation records are created here; ACM
 # completes validation on its own once DNS resolves. The ALB therefore always
 # comes up, and HTTPS on the custom name starts working when DNS lands.
+#
+# SAN CHANGES REPLACE THE CERTIFICATE (2026-09-06, grafana_hostname added).
+# ACM cannot add a subject alternative name to an issued certificate, so any
+# edit to domain_name/subject_alternative_names forces a NEW certificate with a
+# NEW ARN. Consequences, stated plainly because they are load-bearing:
+#   * create_before_destroy keeps the OLD certificate alive until the new one
+#     has been created, so nothing is deleted out from under the ALB.
+#   * Every consumer (Argo CD ingress via bootstrap.sh, ShopFast values via the
+#     build_push GitOps commit, Grafana ingress) reads acm_certificate_arn from
+#     terraform state, so they all move to the NEW arn on this same run.
+#   * The new certificate starts PENDING_VALIDATION. Until the validation CNAME
+#     for EVERY name on it exists in DNS, ACM will not issue it and browsers
+#     reject HTTPS on all three hostnames.
+# The grafana_certificate_validation_record output below exists so the exact
+# record to create in cPanel is printed on its own, not buried in a JSON blob.
 # ---------------------------------------------------------------------------
 
 resource "aws_route53_zone" "main" {
@@ -27,6 +42,7 @@ resource "aws_acm_certificate" "platform" {
 
   subject_alternative_names = [
     var.app_hostname,
+    var.grafana_hostname,
   ]
 
   lifecycle {

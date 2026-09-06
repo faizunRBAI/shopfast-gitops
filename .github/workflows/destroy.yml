@@ -16,6 +16,7 @@ jobs:
       TF_VAR_base_domain: royalbengal.xyz
       TF_VAR_argocd_hostname: argocd.shopfast.royalbengal.xyz
       TF_VAR_app_hostname: shopfast.royalbengal.xyz
+      TF_VAR_grafana_hostname: grafana.shopfast.royalbengal.xyz
     steps:
     - uses: actions/checkout@v4
     - uses: hashicorp/setup-terraform@v3

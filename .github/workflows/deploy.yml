@@ -92,6 +92,7 @@ jobs:
       TF_VAR_base_domain: royalbengal.xyz
       TF_VAR_argocd_hostname: argocd.shopfast.royalbengal.xyz
       TF_VAR_app_hostname: shopfast.royalbengal.xyz
+      TF_VAR_grafana_hostname: grafana.shopfast.royalbengal.xyz
     timeout-minutes: 60
     steps:
     - uses: actions/checkout@v4
@@ -111,14 +112,19 @@ jobs:
     - name: Terraform apply
       run: terraform apply -input=false -auto-approve
       working-directory: infra
-    - name: "Route 53 nameservers \u2014 ACTION REQUIRED at your registrar"
-      run: 'echo "::group::Set these nameservers on royalbengal.xyz (see docs/DNS-CPANEL.md)"
+    - name: "ACTION REQUIRED \u2014 add the Grafana certificate validation CNAME in\
+        \ cPanel"
+      run: bash ../scripts/print-cert-action.sh
+      working-directory: infra
+    - name: Route 53 nameservers and full validation record set
+      run: 'echo "::group::Nameservers for royalbengal.xyz (only if you delegate to
+        Route 53)"
 
         terraform output -json route53_nameservers
 
         echo "::endgroup::"
 
-        echo "::group::ACM validation records (only if you keep DNS on cPanel)"
+        echo "::group::All ACM validation records (DNS stays on cPanel)"
 
         terraform output -json acm_validation_records
 
@@ -246,11 +252,17 @@ jobs:
 
         # file and its ARN precondition check would report a false warning.
 
+        # The monitoring child carries Grafana''s ingress certificate ARN and
+
+        # is rewritten by the same commit, so it must be refreshed too.
+
         git fetch origin "${BRANCH}"
 
         git checkout "origin/${BRANCH}" -- gitops/applications/shopfast/values.yaml
 
-        echo "ShopFast desired state refreshed from origin/${BRANCH}."
+        git checkout "origin/${BRANCH}" -- gitops/apps/children/monitoring.yaml
+
+        echo "Desired state refreshed from origin/${BRANCH}."
 
         '
       env:
@@ -281,6 +293,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
+      GRAFANA_HOSTNAME: grafana.shopfast.royalbengal.xyz
     timeout-minutes: 40
     steps:
     - uses: actions/checkout@v4

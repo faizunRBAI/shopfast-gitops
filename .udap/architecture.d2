@@ -5,7 +5,7 @@ github: GitHub Monorepo { shape: rectangle; udap-type: generic.app }
 actions: GitHub Actions CI { shape: rectangle; udap-type: generic.app }
 ecr: Amazon ECR { shape: rectangle; udap-type: aws.ecr }
 route53: Route 53 shopfast.royalbengal.xyz { shape: rectangle; udap-type: aws.route53 }
-acm: ACM TLS Certificate { shape: rectangle; udap-type: aws.acm }
+acm: ACM TLS Certificate 3 SANs { shape: rectangle; udap-type: aws.acm }
 s3state: S3 Terraform State { shape: cylinder; udap-type: aws.s3 }
 vpc: VPC 10.42.0.0/16 us-east-1 {
   alb: ALB Ingress HTTPS { shape: rectangle; udap-type: aws.alb }
@@ -20,7 +20,7 @@ user -> github: git push
 github -> actions: workflow dispatch
 actions -> s3state: terraform state
 actions -> ecr: build and push SHA tag
-actions -> github: bump image tag in gitops
+actions -> github: bump image tag and cert arn in gitops
 vpc.argocd -> github: poll desired state
 vpc.argocd -> vpc.shopfast: sync app of apps
 vpc.argocd -> vpc.monitoring: sync monitoring
@@ -33,4 +33,5 @@ route53 -> vpc.alb: alias record
 acm -> vpc.alb: tls certificate
 vpc.alb -> vpc.argocd: argocd host
 vpc.alb -> vpc.shopfast: app host
+vpc.alb -> vpc.monitoring: grafana host
 vpc.monitoring -> vpc.shopfast: scrape prometheus metrics

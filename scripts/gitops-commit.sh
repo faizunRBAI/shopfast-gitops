@@ -3,20 +3,29 @@
 # GitOps desired-state commit.
 #
 # This is THE deployment trigger. CI never touches the cluster: it rewrites the
-# deployed values file and pushes that commit. Argo CD observes the change and
+# deployed values files and pushes that commit. Argo CD observes the change and
 # reconciles. If this push does not land, the new image exists in ECR but
 # nothing deploys it.
 #
 # WHAT THIS WRITES
-#   image.repository / image.tag  — the immutable Git SHA image reference
-#   ingress.certificateArn        — the ACM cert ARN, when CERT_ARN is provided
+#   gitops/applications/shopfast/values.yaml
+#     image.repository / image.tag  — the immutable Git SHA image reference
+#     ingress.certificateArn        — the ACM cert ARN, when CERT_ARN is provided
+#
+#   gitops/apps/children/monitoring.yaml
+#     grafana ingress certificate-arn annotation — same ACM cert ARN
 #
 #   The certificate ARN belongs HERE, in git, and not as a Helm parameter
-#   patched onto the shopfast Application at bootstrap time. The root
-#   App-of-Apps reconciles that Application from git; an apply-time patch is a
-#   second writer for the same field, so root reverts it, bootstrap re-adds it,
-#   and the Application stays OutOfSync forever with its workload never
-#   created. One writer, one source of truth.
+#   patched onto the Applications at bootstrap time. The root App-of-Apps
+#   reconciles those Applications from git; an apply-time patch is a second
+#   writer for the same field, so root reverts it, bootstrap re-adds it, and
+#   the Application stays OutOfSync forever with its workload never created.
+#   One writer, one source of truth.
+#
+#   ONE CERTIFICATE, THREE HOSTNAMES: argocd / shopfast / grafana share a single
+#   ACM certificate. Adding a SAN replaces it and mints a NEW ARN, so both files
+#   below must be re-pointed together in the SAME commit — otherwise one
+#   hostname keeps a dangling reference to a certificate that is being retired.
 #
 # AUTHENTICATION
 #   The repository's default workflow permission is "read and write"
@@ -48,6 +57,7 @@ set -euo pipefail
 : "${BRANCH:?BRANCH must be set}"
 
 VALUES="gitops/applications/shopfast/values.yaml"
+MONITORING="gitops/apps/children/monitoring.yaml"
 
 SET_IMAGE_ARGS=(
   --values "${VALUES}"
@@ -69,9 +79,17 @@ fi
 
 python3 scripts/set-image.py "${SET_IMAGE_ARGS[@]}"
 
+# Grafana's ingress lives inside the monitoring Application's embedded Helm
+# values, so it needs its own precise rewriter (see scripts/set-grafana-cert.py).
+if [ -n "${CERT_ARN:-}" ]; then
+  python3 scripts/set-grafana-cert.py \
+    --manifest "${MONITORING}" \
+    --certificate-arn "${CERT_ARN}"
+fi
+
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
-git add "${VALUES}"
+git add "${VALUES}" "${MONITORING}"
 
 if git diff --cached --quiet; then
   echo "GitOps values already at this revision — nothing to commit."

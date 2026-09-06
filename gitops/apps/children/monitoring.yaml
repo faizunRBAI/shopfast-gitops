@@ -6,6 +6,13 @@
 #   - Grafana with provisioned datasource
 # It replaces kube-prometheus-stack while keeping the Prometheus query API, so
 # Argo Rollouts AnalysisTemplates and standard dashboards work unchanged.
+#
+# SINGLE WRITER: the root App-of-Apps reconciles this file from git, so every
+# environment-specific value — including grafana.ingress.annotations' ACM
+# certificate ARN — must be committed HERE. Nothing may be patched onto this
+# Application at bootstrap time; root would revert it on the next sync and the
+# Application would never leave OutOfSync. The ARN line below is rewritten by
+# the build_push stage (scripts/set-grafana-cert.py) from terraform state.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -119,13 +126,74 @@ spec:
                 foldersFromFilesStructure: true
             datasources:
               enabled: true
+
+          # PUBLIC EXPOSURE (2026-09-06, owner-approved).
+          # Joins the SAME ALB as Argo CD and ShopFast via group.name
+          # shopfast-platform — one load balancer, three host rules, no extra
+          # AWS spend. group.order 30 keeps it after argocd (10) and the app.
+          # certificate-arn is committed from terraform state by build_push;
+          # it must carry a SAN for this hostname or the ALB serves the wrong
+          # certificate and browsers refuse the connection.
+          ingress:
+            enabled: true
+            ingressClassName: alb
+            hosts:
+              - grafana.shopfast.royalbengal.xyz
+            path: /
+            pathType: Prefix
+            annotations:
+              alb.ingress.kubernetes.io/scheme: internet-facing
+              alb.ingress.kubernetes.io/target-type: ip
+              alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+              alb.ingress.kubernetes.io/ssl-redirect: "443"
+              alb.ingress.kubernetes.io/backend-protocol: HTTP
+              alb.ingress.kubernetes.io/healthcheck-path: /api/health
+              alb.ingress.kubernetes.io/success-codes: "200"
+              alb.ingress.kubernetes.io/group.name: shopfast-platform
+              alb.ingress.kubernetes.io/group.order: "30"
+              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
+
           grafana.ini:
             server:
-              root_url: "%(protocol)s://%(domain)s/"
+              # Grafana builds absolute URLs (OAuth redirects, share links,
+              # alert links) from root_url. Left as the generic %(domain)s form
+              # it resolves to the pod hostname behind the ALB, so links point
+              # somewhere unreachable. Pin it to the public origin.
+              root_url: "https://grafana.shopfast.royalbengal.xyz/"
+              enforce_domain: false
             auth.anonymous:
+              # No unauthenticated access to dashboards or the datasource.
               enabled: false
+            auth.basic:
+              enabled: true
+            users:
+              # This is an internal operations dashboard, not a signup product.
+              allow_sign_up: false
+              allow_org_create: false
+              auto_assign_org_role: Viewer
             security:
+              # Session cookies are HTTPS-only and not readable from JS.
               cookie_secure: true
+              cookie_samesite: lax
+              # HSTS: the ALB redirects 80 -> 443, this stops the first-request
+              # downgrade window on repeat visits.
+              strict_transport_security: true
+              strict_transport_security_max_age_seconds: 31536000
+              content_security_policy: true
+              # Do not leak the exact build to unauthenticated probes.
+              hide_version: true
+            login:
+              # The admin username is the default `admin` (owner-accepted), so
+              # brute-force resistance is carried entirely by lockout here.
+              disable_initial_admin_creation: false
+            security.brute_force_login_protection:
+              enabled: true
+            snapshots:
+              # No publishing dashboards to snapshots.raintank.io.
+              external_enabled: false
+            analytics:
+              reporting_enabled: false
+              check_for_updates: false
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
