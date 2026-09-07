@@ -7,12 +7,27 @@
 # It replaces kube-prometheus-stack while keeping the Prometheus query API, so
 # Argo Rollouts AnalysisTemplates and standard dashboards work unchanged.
 #
-# SINGLE WRITER: the root App-of-Apps reconciles this file from git, so every
-# environment-specific value — including grafana.ingress.annotations' ACM
-# certificate ARN — must be committed HERE. Nothing may be patched onto this
-# Application at bootstrap time; root would revert it on the next sync and the
-# Application would never leave OutOfSync. The ARN line below is rewritten by
-# the build_push stage (scripts/set-grafana-cert.py) from terraform state.
+# MULTI-SOURCE (refactored 2026-09-07)
+#   Source 1 is the upstream chart, pinned to 0.35.4.
+#   Source 2 is THIS repository, referenced as `$values`, supplying
+#   gitops/monitoring/values.yaml.
+#
+#   The values used to be a ~150-line inline block right here. Moving them out
+#   is not cosmetic: the Grafana ACM certificate ARN lives in those values and
+#   is rewritten by scripts/set-grafana-cert.py. While it lived inside this
+#   Application manifest, that script had to edit an object the root
+#   App-of-Apps also reconciles, and the guard protecting the value could
+#   deadlock the build that would heal it — attempt 24, where a stale ARN
+#   failed the `security` stage and thereby prevented build_push, the only
+#   thing that rewrites the ARN, from ever running. A plain values file has no
+#   such coupling.
+#
+#   The chart version and every value are UNCHANGED by the move, so the first
+#   sync after this refactor should report no object-level differences.
+#
+# SINGLE WRITER: the root App-of-Apps reconciles this file from git. Nothing
+# may be patched onto this Application at bootstrap time; root would revert it
+# on the next sync and the Application would never leave OutOfSync.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -25,184 +40,22 @@ metadata:
     argocd.argoproj.io/sync-wave: "10"
 spec:
   project: default
-  source:
-    repoURL: https://victoriametrics.github.io/helm-charts
-    chart: victoria-metrics-k8s-stack
-    targetRevision: 0.35.4
-    helm:
-      releaseName: vm
-      values: |
-        fullnameOverride: vm
-
-        victoria-metrics-operator:
-          enabled: true
-
-        vmsingle:
-          enabled: true
-          spec:
-            retentionPeriod: "7d"
-            resources:
-              requests:
-                cpu: 200m
-                memory: 512Mi
-              limits:
-                memory: 2Gi
-            storage:
-              accessModes: ["ReadWriteOnce"]
-              resources:
-                requests:
-                  storage: 20Gi
-
-        vmagent:
-          enabled: true
-          spec:
-            resources:
-              requests:
-                cpu: 100m
-                memory: 256Mi
-              limits:
-                memory: 1Gi
-
-        vmalert:
-          enabled: true
-          spec:
-            extraArgs:
-              # Alertmanager is intentionally disabled at Tier 1: recording and
-              # alerting RULES are still evaluated and visible in Grafana, but
-              # there is no notification receiver to route them to. The chart
-              # refuses to render vmalert without a notifier target, so this
-              # declares the "no receiver" case explicitly rather than leaving
-              # the whole monitoring Application unable to generate manifests.
-              # Enable alertmanager and drop this flag to start routing alerts.
-              notifier.blackhole: "true"
-
-        alertmanager:
-          enabled: false
-
-        # Kubernetes-level metrics.
-        kube-state-metrics:
-          enabled: true
-        prometheus-node-exporter:
-          enabled: true
-
-        # Control-plane components EKS does not expose to scrapers.
-        kubeApiServer:
-          enabled: true
-        kubeControllerManager:
-          enabled: false
-        kubeScheduler:
-          enabled: false
-        kubeEtcd:
-          enabled: false
-        kubeProxy:
-          enabled: false
-
-        grafana:
-          enabled: true
-          replicas: 1
-          # Admin password is created by the bootstrap script as a k8s secret;
-          # it is never stored in git.
-          admin:
-            existingSecret: grafana-admin-credentials
-            userKey: admin-user
-            passwordKey: admin-password
-          persistence:
-            enabled: true
-            size: 10Gi
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              memory: 1Gi
-          sidecar:
-            dashboards:
-              enabled: true
-              label: grafana_dashboard
-              labelValue: "1"
-              searchNamespace: ALL
-              folderAnnotation: grafana_folder
-              provider:
-                foldersFromFilesStructure: true
-            datasources:
-              enabled: true
-
-          # PUBLIC EXPOSURE (2026-09-06, owner-approved).
-          # Joins the SAME ALB as Argo CD and ShopFast via group.name
-          # shopfast-platform — one load balancer, three host rules, no extra
-          # AWS spend. group.order 30 keeps it after argocd (10) and the app.
-          # certificate-arn is committed from terraform state by build_push;
-          # it must carry a SAN for this hostname or the ALB serves the wrong
-          # certificate and browsers refuse the connection.
-          #
-          # ARN CORRECTED 2026-09-07: this file still held a305f33d, the RETIRED
-          # 2-SAN certificate (argocd + apex only — no grafana SAN). The
-          # replacement 3-SAN certificate faa631c6 was minted during the ACM fix
-          # and written into gitops/applications/shopfast/values.yaml, but
-          # set-grafana-cert.py only runs in build_push, and no build_push had
-          # run since. The two committed copies therefore disagreed, which is
-          # exactly what verify-gitops-manifests.sh check 5 exists to catch —
-          # and it caught it on its first opportunity.
-          ingress:
-            enabled: true
-            ingressClassName: alb
-            hosts:
-              - grafana.shopfast.royalbengal.xyz
-            path: /
-            pathType: Prefix
-            annotations:
-              alb.ingress.kubernetes.io/scheme: internet-facing
-              alb.ingress.kubernetes.io/target-type: ip
-              alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-              alb.ingress.kubernetes.io/ssl-redirect: "443"
-              alb.ingress.kubernetes.io/backend-protocol: HTTP
-              alb.ingress.kubernetes.io/healthcheck-path: /api/health
-              alb.ingress.kubernetes.io/success-codes: "200"
-              alb.ingress.kubernetes.io/group.name: shopfast-platform
-              alb.ingress.kubernetes.io/group.order: "30"
-              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/faa631c6-ce37-4718-8421-9389eddf9f01"
-
-          grafana.ini:
-            server:
-              # Grafana builds absolute URLs (OAuth redirects, share links,
-              # alert links) from root_url. Left as the generic %(domain)s form
-              # it resolves to the pod hostname behind the ALB, so links point
-              # somewhere unreachable. Pin it to the public origin.
-              root_url: "https://grafana.shopfast.royalbengal.xyz/"
-              enforce_domain: false
-            auth.anonymous:
-              # No unauthenticated access to dashboards or the datasource.
-              enabled: false
-            auth.basic:
-              enabled: true
-            users:
-              # This is an internal operations dashboard, not a signup product.
-              allow_sign_up: false
-              allow_org_create: false
-              auto_assign_org_role: Viewer
-            security:
-              # Session cookies are HTTPS-only and not readable from JS.
-              cookie_secure: true
-              cookie_samesite: lax
-              # HSTS: the ALB redirects 80 -> 443, this stops the first-request
-              # downgrade window on repeat visits.
-              strict_transport_security: true
-              strict_transport_security_max_age_seconds: 31536000
-              content_security_policy: true
-              # Do not leak the exact build to unauthenticated probes.
-              hide_version: true
-            login:
-              # The admin username is the default `admin` (owner-accepted), so
-              # brute-force resistance is carried entirely by lockout here.
-              disable_initial_admin_creation: false
-            security.brute_force_login_protection:
-              enabled: true
-            snapshots:
-              # No publishing dashboards to snapshots.raintank.io.
-              external_enabled: false
-            analytics:
-              reporting_enabled: false
-              check_for_updates: false
+  sources:
+    # 1. The chart itself, from the upstream Helm repository.
+    - repoURL: https://victoriametrics.github.io/helm-charts
+      chart: victoria-metrics-k8s-stack
+      targetRevision: 0.35.4
+      helm:
+        releaseName: vm
+        # $values resolves to the source below whose `ref` is `values`.
+        # The path is relative to that repository's ROOT.
+        valueFiles:
+          - $values/gitops/monitoring/values.yaml
+    # 2. This repository, contributing values only. A source carrying `ref` and
+    #    no `path` supplies files to other sources and renders nothing itself.
+    - repoURL: https://github.com/faizunRBAI/shopfast-gitops.git
+      targetRevision: main
+      ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring

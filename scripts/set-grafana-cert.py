@@ -1,27 +1,56 @@
 #!/usr/bin/env python3
 """
-Commit the ACM certificate ARN into the monitoring Application's Grafana ingress.
+Commit the ACM certificate ARN into the Grafana ingress annotations.
+
+TARGET FILE (moved 2026-09-07)
+------------------------------
+This used to rewrite gitops/apps/children/monitoring.yaml, because the chart
+values lived inline inside that Argo CD Application manifest. The monitoring
+Application is now MULTI-SOURCE and its values live in a plain file:
+
+    gitops/monitoring/values.yaml
+
+The rewrite logic is unchanged — it targets a single annotation line and does
+not care how deeply it is nested — but the target is now an ordinary values
+file rather than an Application manifest. That is the point of the move: see
+"WHY THIS MATTERS" below.
 
 WHY A SEPARATE SCRIPT FROM set-image.py
 ---------------------------------------
 set-image.py rewrites keys inside a plain Helm values file, scoping each key to
-a TOP-LEVEL block. Grafana's ingress annotations are not top-level: they live
-inside `spec.source.helm.values`, an embedded YAML document nested roughly eight
-levels deep inside an Argo CD Application manifest. Teaching the block-scoped
-rewriter to reach in there would make it guess, and a wrong guess corrupts the
-manifest that defines the whole monitoring stack.
+a TOP-LEVEL block. Grafana's ingress annotations are not top-level: they sit
+several levels down under `grafana.ingress.annotations`. Teaching the
+block-scoped rewriter to reach in there would make it guess, and a wrong guess
+corrupts the configuration of the whole monitoring stack.
 
 This script instead targets exactly one thing: the single line carrying the
 `alb.ingress.kubernetes.io/certificate-arn` annotation. It refuses to run if it
-does not find exactly one such line, so a refactor of the manifest fails the
-build loudly instead of silently leaving a stale certificate behind.
+does not find exactly one such line, so a refactor of the file fails the build
+loudly instead of silently leaving a stale certificate behind.
+
+WHY THIS MATTERS — THE ATTEMPT 24 DEADLOCK
+------------------------------------------
+When this ARN lived inside the Application manifest, three things were coupled
+that should not have been: the definition of the monitoring app, a value CI
+rewrites, and a guard that compares that value against the ShopFast copy.
+
+On 2026-09-07 the ARN in the Application went stale (an ACM replacement during
+a provision-only run rewrote the ShopFast copy but not this one). The guard,
+correctly, failed the `security` stage. But `security` runs BEFORE `build_push`
+— and build_push is the only stage that runs this script. So the single thing
+that would have healed the value could never run. The build was deadlocked by
+its own guard.
+
+Pointing this script at a plain values file removes the coupling: the file is
+not reconciled by the root App-of-Apps, and rewriting it is an ordinary
+GitOps commit rather than an edit to a live Application definition.
 
 SINGLE WRITER RULE
 ------------------
-The root App-of-Apps reconciles gitops/apps/children/*.yaml FROM GIT. Any field
-injected into this Application at apply time is a second writer: root reverts
-it, the patcher re-adds it, and the Application never leaves OutOfSync. So the
-ARN is committed to git here, exactly like the ShopFast image tag.
+The values file is reconciled from git via the Application's `$values` source.
+Any field injected into the live release at apply time is a second writer:
+Argo reverts it, the patcher re-adds it, and the app never leaves OutOfSync. So
+the ARN is committed to git here, exactly like the ShopFast image tag.
 
 WHY THE ARN CHANGES AT ALL
 --------------------------
@@ -52,7 +81,10 @@ def main() -> int:
     parser.add_argument(
         "--manifest",
         required=True,
-        help="path to the Argo CD Application manifest carrying the Grafana ingress",
+        help=(
+            "path to the file carrying the Grafana ingress certificate-arn "
+            "annotation (gitops/monitoring/values.yaml)"
+        ),
     )
     parser.add_argument(
         "--certificate-arn",

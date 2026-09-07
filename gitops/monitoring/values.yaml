@@ -1,0 +1,192 @@
+# ---------------------------------------------------------------------------
+# victoria-metrics-k8s-stack VALUES.
+#
+# These values were relocated verbatim from the inline `helm.values` block of
+# gitops/apps/children/monitoring.yaml (2026-09-07). Nothing was retuned in the
+# move — the chart version is still pinned to 0.35.4 and every value is
+# byte-identical, so a sync after the refactor is a no-op at the Kubernetes
+# object level.
+#
+# WHY THEY LIVE HERE NOW
+#   The Application is a MULTI-SOURCE Application: the chart comes from the
+#   upstream Helm repo, and these values come from this repository via a
+#   `$values` source reference. That separates "which chart" from "how it is
+#   configured".
+#
+#   The concrete payoff is the certificate ARN below. When it lived inside the
+#   Application manifest, scripts/set-grafana-cert.py had to rewrite an Argo CD
+#   Application — an object the root App-of-Apps also reconciles — and the
+#   guard that protects that value could deadlock the very build that would
+#   heal it (attempt 24: the ARN was stale, the guard failed the run in the
+#   `security` stage, and build_push, which is what rewrites the ARN, never
+#   got to run). Rewriting a plain values file has no such coupling.
+#
+# SINGLE WRITER STILL APPLIES: this file is reconciled from git. Nothing may be
+# patched onto the live release at bootstrap time — root reverts it.
+# ---------------------------------------------------------------------------
+fullnameOverride: vm
+
+victoria-metrics-operator:
+  enabled: true
+
+vmsingle:
+  enabled: true
+  spec:
+    retentionPeriod: "7d"
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 2Gi
+    storage:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+
+vmagent:
+  enabled: true
+  spec:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+
+vmalert:
+  enabled: true
+  spec:
+    extraArgs:
+      # Alertmanager is intentionally disabled at Tier 1: recording and
+      # alerting RULES are still evaluated and visible in Grafana, but
+      # there is no notification receiver to route them to. The chart
+      # refuses to render vmalert without a notifier target, so this
+      # declares the "no receiver" case explicitly rather than leaving
+      # the whole monitoring Application unable to generate manifests.
+      # Enable alertmanager and drop this flag to start routing alerts.
+      notifier.blackhole: "true"
+
+alertmanager:
+  enabled: false
+
+# Kubernetes-level metrics.
+kube-state-metrics:
+  enabled: true
+prometheus-node-exporter:
+  enabled: true
+
+# Control-plane components EKS does not expose to scrapers.
+kubeApiServer:
+  enabled: true
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+grafana:
+  enabled: true
+  replicas: 1
+  # Admin password is created by the bootstrap script as a k8s secret;
+  # it is never stored in git.
+  admin:
+    existingSecret: grafana-admin-credentials
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+
+  # PUBLIC EXPOSURE (2026-09-06, owner-approved).
+  # Joins the SAME ALB as Argo CD and ShopFast via group.name
+  # shopfast-platform — one load balancer, three host rules, no extra
+  # AWS spend. group.order 30 keeps it after argocd (10) and the app.
+  # certificate-arn is committed from terraform state by build_push;
+  # it must carry a SAN for this hostname or the ALB serves the wrong
+  # certificate and browsers refuse the connection.
+  #
+  # THIS ARN IS REWRITTEN BY scripts/set-grafana-cert.py. Its target moved
+  # here from the Application manifest on 2026-09-07; the script and
+  # verify-gitops-manifests.sh check 5 were repointed in the same commit.
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    hosts:
+      - grafana.shopfast.royalbengal.xyz
+    path: /
+    pathType: Prefix
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/backend-protocol: HTTP
+      alb.ingress.kubernetes.io/healthcheck-path: /api/health
+      alb.ingress.kubernetes.io/success-codes: "200"
+      alb.ingress.kubernetes.io/group.name: shopfast-platform
+      alb.ingress.kubernetes.io/group.order: "30"
+      alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/faa631c6-ce37-4718-8421-9389eddf9f01"
+
+  grafana.ini:
+    server:
+      # Grafana builds absolute URLs (OAuth redirects, share links,
+      # alert links) from root_url. Left as the generic %(domain)s form
+      # it resolves to the pod hostname behind the ALB, so links point
+      # somewhere unreachable. Pin it to the public origin.
+      root_url: "https://grafana.shopfast.royalbengal.xyz/"
+      enforce_domain: false
+    auth.anonymous:
+      # No unauthenticated access to dashboards or the datasource.
+      enabled: false
+    auth.basic:
+      enabled: true
+    users:
+      # This is an internal operations dashboard, not a signup product.
+      allow_sign_up: false
+      allow_org_create: false
+      auto_assign_org_role: Viewer
+    security:
+      # Session cookies are HTTPS-only and not readable from JS.
+      cookie_secure: true
+      cookie_samesite: lax
+      # HSTS: the ALB redirects 80 -> 443, this stops the first-request
+      # downgrade window on repeat visits.
+      strict_transport_security: true
+      strict_transport_security_max_age_seconds: 31536000
+      content_security_policy: true
+      # Do not leak the exact build to unauthenticated probes.
+      hide_version: true
+    login:
+      # The admin username is the default `admin` (owner-accepted), so
+      # brute-force resistance is carried entirely by lockout here.
+      disable_initial_admin_creation: false
+    security.brute_force_login_protection:
+      enabled: true
+    snapshots:
+      # No publishing dashboards to snapshots.raintank.io.
+      external_enabled: false
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false

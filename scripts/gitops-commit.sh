@@ -12,8 +12,15 @@
 #     image.repository / image.tag  — the immutable Git SHA image reference
 #     ingress.certificateArn        — the ACM cert ARN, when CERT_ARN is provided
 #
-#   gitops/apps/children/monitoring.yaml
+#   gitops/monitoring/values.yaml
 #     grafana ingress certificate-arn annotation — same ACM cert ARN
+#
+#   TARGET MOVED 2026-09-07: the Grafana ARN used to live inside
+#   gitops/apps/children/monitoring.yaml, in that Application's inline Helm
+#   values. The monitoring Application is now multi-source and its values are a
+#   plain file, so this script rewrites a values file rather than an Argo CD
+#   Application definition. That decoupling is deliberate — see the docstring
+#   in scripts/set-grafana-cert.py for the deadlock it removes.
 #
 #   The certificate ARN belongs HERE, in git, and not as a Helm parameter
 #   patched onto the Applications at bootstrap time. The root App-of-Apps
@@ -26,6 +33,7 @@
 #   ACM certificate. Adding a SAN replaces it and mints a NEW ARN, so both files
 #   below must be re-pointed together in the SAME commit — otherwise one
 #   hostname keeps a dangling reference to a certificate that is being retired.
+#   scripts/verify-gitops-manifests.sh check 5 proves they agree.
 #
 # THE COMMIT MESSAGE IS LOAD-BEARING
 #   The "ci: deploy shopfast <tag>" form below is parsed by
@@ -52,7 +60,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/gitops-push.sh"
 
 VALUES="gitops/applications/shopfast/values.yaml"
-MONITORING="gitops/apps/children/monitoring.yaml"
+# The monitoring stack's Helm values (multi-source $values file), NOT the
+# Application manifest.
+MONITORING_VALUES="gitops/monitoring/values.yaml"
 
 SET_IMAGE_ARGS=(
   --values "${VALUES}"
@@ -74,15 +84,15 @@ fi
 
 python3 scripts/set-image.py "${SET_IMAGE_ARGS[@]}"
 
-# Grafana's ingress lives inside the monitoring Application's embedded Helm
-# values, so it needs its own precise rewriter (see scripts/set-grafana-cert.py).
+# Grafana's ingress annotation is nested under grafana.ingress.annotations, so
+# it needs its own precise rewriter (see scripts/set-grafana-cert.py).
 if [ -n "${CERT_ARN:-}" ]; then
   python3 scripts/set-grafana-cert.py \
-    --manifest "${MONITORING}" \
+    --manifest "${MONITORING_VALUES}" \
     --certificate-arn "${CERT_ARN}"
 fi
 
-git add "${VALUES}" "${MONITORING}"
+git add "${VALUES}" "${MONITORING_VALUES}"
 
 # NOTE: the message format is parsed by scripts/rollback-resolve.sh.
 if gitops_push "ci: deploy shopfast ${TAG}"; then
