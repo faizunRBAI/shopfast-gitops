@@ -6,20 +6,44 @@
  Prometheus ServiceMonitor). Selects the ACTIVE Service, so it follows
  whichever colour currently serves production traffic.
 
- THE VERSION RELABEL
- -------------------
- Without relabelling, every pod's metrics carry the same label set and a
- dashboard cannot tell the old release from the new one — which defeats the
- purpose of blue/green. These rules copy the pod-template hash onto a
- `version` label, plus the strategy and colour.
+ WHAT THE APP ALREADY PROVIDES — DO NOT DUPLICATE IT
+ ---------------------------------------------------
+ application.yml declares Micrometer common tags, so EVERY app metric is
+ already exposed carrying:
+     application="shopfast"  version="<git-sha>"  release_color="blue|green"
+ Verified from the pod itself:
+     jvm_threads_live_threads{application="shopfast",
+                              release_color="blue",
+                              version="5274b56"} 22.0
 
- SPELLING — this is the trap. The Kubernetes pod LABEL is hyphenated:
+ `version` there is the GIT SHA — the same identifier used by the image tag,
+ the rollback workflow and the label-sync CronJob. It is the release key a
+ human actually recognises.
+
+ THE COLLISION THIS TEMPLATE MUST AVOID
+ --------------------------------------
+ A relabel writing targetLabel: version OVERWRITES the app's own tag, and
+ the scraper renames the displaced one to `exported_version`. Observed
+ exactly that on the live stack:
+     version="64d7d69bb5"        <- pod-template hash (relabel won)
+     exported_version="5274b56"  <- the real Git SHA, displaced
+ Dashboards then key on an opaque hash while the meaningful identifier hides
+ in a label nobody queries. Nothing errors; the data is just subtly wrong.
+
+ So the pod-template hash is published under its OWN name, `pod_hash`:
+   version    = git SHA            (from the app — release identity)
+   pod_hash   = pod-template hash  (from here  — ReplicaSet generation)
+   strategy   = standard|bluegreen|canary (from here — chart cannot self-report)
+
+ `color` is NOT relabelled: the app already emits release_color.
+
+ SPELLING — the trap. The Kubernetes pod LABEL is hyphenated:
      rollouts-pod-template-hash   (Rollouts)
      pod-template-hash            (plain Deployment)
  but service discovery exposes labels as __meta_kubernetes_pod_label_<name>
  with every non-alphanumeric character converted to an UNDERSCORE. So the
  sourceLabels below MUST use underscores. Written with hyphens they match
- nothing, emit an empty `version`, and DO NOT ERROR.
+ nothing, emit an empty label, and DO NOT ERROR.
 
  Both hashes are listed because the chart renders a Rollout for
  bluegreen/canary and a Deployment for standard; exactly one of the two
@@ -42,25 +66,20 @@ spec:
       interval: {{ .Values.metrics.serviceScrape.interval }}
       {{- if .Values.metrics.serviceScrape.relabelVersion }}
       relabelConfigs:
-        # Rollouts pods: rollouts-pod-template-hash -> version
+        # Rollouts pods: rollouts-pod-template-hash -> pod_hash
         - sourceLabels: [__meta_kubernetes_pod_label_rollouts_pod_template_hash]
           regex: (.+)
-          targetLabel: version
+          targetLabel: pod_hash
           replacement: $1
           action: replace
-        # Deployment pods (strategy=standard): pod-template-hash -> version
+        # Deployment pods (strategy=standard): pod-template-hash -> pod_hash
         - sourceLabels: [__meta_kubernetes_pod_label_pod_template_hash]
           regex: (.+)
-          targetLabel: version
+          targetLabel: pod_hash
           replacement: $1
           action: replace
-        # Release colour, so a dashboard can split blue vs green directly.
-        - sourceLabels: [__meta_kubernetes_pod_label_shopfast_xyz_color]
-          regex: (.+)
-          targetLabel: color
-          replacement: $1
-          action: replace
-        # Delivery strategy in effect when the sample was taken.
+        # Delivery strategy in effect when the sample was taken. The app cannot
+        # report this — it does not know how it was deployed.
         - targetLabel: strategy
           replacement: {{ .Values.strategy | quote }}
           action: replace

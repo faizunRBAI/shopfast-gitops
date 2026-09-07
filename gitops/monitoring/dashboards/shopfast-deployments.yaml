@@ -8,6 +8,34 @@ metadata:
   annotations:
     grafana_folder: "ShopFast"
 data:
+  # ==========================================================================
+  # LABEL VOCABULARY — verified 2026-09-07 against BOTH the live store and the
+  # pod's raw /actuator/prometheus output.
+  #
+  #   FROM THE APP (Micrometer common tags, application.yml):
+  #     application="shopfast"   version="<git-sha>"   release_color="blue|green"
+  #
+  #   FROM THE SCRAPE (chart relabelConfigs):
+  #     pod_hash="<pod-template-hash>"   strategy="standard|bluegreen|canary"
+  #
+  #   FROM SERVICE DISCOVERY:
+  #     namespace  job  service  pod  container  endpoint  instance
+  #
+  # THE ONE TRAP: `up` IS SYNTHESISED BY THE SCRAPER and carries NO app tags.
+  # up{application="shopfast"} returns EMPTY — not because the app is down, but
+  # because that label only exists on metrics the app itself exposes. Panels
+  # needing release identity must query an app metric such as
+  # process_uptime_seconds. An earlier revision of this dashboard used
+  # up{application=...} and rendered a permanently empty panel that looked
+  # exactly like an outage.
+  #
+  # job="shopfast" is used rather than namespace="shopfast" because the preview
+  # Service produces a SECOND job (shopfast-preview) scraping the same pods;
+  # selecting on namespace alone double-counts every rate.
+  #
+  # For the per-release breakdown of the golden signals, see the companion
+  # dashboard "ShopFast — Release Comparison" (uid shopfast-releases).
+  # ==========================================================================
   shopfast-deployments.json: |
     {
       "title": "ShopFast — Deployments & Rollouts",
@@ -26,7 +54,7 @@ data:
         {
           "type": "stat",
           "title": "Rollout phase",
-          "description": "1 = the rollout is currently in this phase.",
+          "description": "1 = the rollout is currently in this phase. Served by the Argo Rollouts controller metrics endpoint (Service + scrape added 2026-09-07).",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
           "targets": [
@@ -39,13 +67,13 @@ data:
         },
         {
           "type": "stat",
-          "title": "Deployed image tag (per pod)",
-          "description": "Immutable Git SHA currently running.",
+          "title": "Releases serving traffic",
+          "description": "Git SHA of each release currently scraped on the active Service. More than one means a rollout is in flight.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
           "targets": [
             {
-              "expr": "count(http_server_requests_seconds_count{application=\"shopfast\"}) by (version)",
+              "expr": "count by (version) (process_uptime_seconds{job=\"shopfast\"})",
               "legendFormat": "{{version}}",
               "refId": "A"
             }
@@ -54,11 +82,12 @@ data:
         {
           "type": "stat",
           "title": "Active release colour",
+          "description": "Blue/green colour reported by the pods themselves behind the active Service.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
           "targets": [
             {
-              "expr": "count(up{application=\"shopfast\"} == 1) by (release_color)",
+              "expr": "count by (release_color) (process_uptime_seconds{job=\"shopfast\"})",
               "legendFormat": "{{release_color}}",
               "refId": "A"
             }
@@ -67,12 +96,13 @@ data:
         {
           "type": "timeseries",
           "title": "Traffic split by release colour (req/s)",
-          "description": "During a canary rollout this shows the weighted shift; during blue/green it shows the cutover.",
+          "description": "During a canary this shows the weighted shift; during blue/green it shows the cutover moment.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+          "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } },
           "targets": [
             {
-              "expr": "sum(rate(http_server_requests_seconds_count{application=\"shopfast\"}[2m])) by (release_color)",
+              "expr": "sum by (release_color) (rate(http_server_requests_seconds_count{job=\"shopfast\"}[2m]))",
               "legendFormat": "{{release_color}}",
               "refId": "A"
             }
@@ -81,13 +111,25 @@ data:
         {
           "type": "timeseries",
           "title": "Error rate by version (5xx %)",
-          "description": "The signal that aborts a canary: if the new version's error rate climbs, promotion should stop.",
+          "description": "The signal that should abort a canary. The `or 0 * <total>` fallback makes a healthy release plot a real 0 carrying its version label, so 'no errors' is never mistaken for 'panel broken'.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
-          "fieldConfig": { "defaults": { "unit": "percent" } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 5 }
+                ]
+              }
+            }
+          },
           "targets": [
             {
-              "expr": "100 * sum(rate(http_server_requests_seconds_count{application=\"shopfast\",status=~\"5..\"}[5m])) by (version) / clamp_min(sum(rate(http_server_requests_seconds_count{application=\"shopfast\"}[5m])) by (version), 0.001)",
+              "expr": "100 * (sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",status=~\"5..\"}[5m])) or 0 * sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\"}[5m]))) / clamp_min(sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\"}[5m])), 0.001)",
               "legendFormat": "{{version}}",
               "refId": "A"
             }
@@ -98,6 +140,7 @@ data:
           "title": "Pod replicas (shopfast namespace)",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "fieldConfig": { "defaults": { "min": 0 } },
           "targets": [
             {
               "expr": "sum(kube_pod_status_phase{namespace=\"shopfast\",phase=\"Running\"})",
@@ -116,9 +159,10 @@ data:
           "title": "Container restarts (shopfast)",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "fieldConfig": { "defaults": { "min": 0 } },
           "targets": [
             {
-              "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"shopfast\"}[15m])) by (pod)",
+              "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=\"shopfast\"}[15m]))",
               "legendFormat": "{{pod}}",
               "refId": "A"
             }

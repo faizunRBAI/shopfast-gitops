@@ -138,9 +138,18 @@ metrics:
     enabled: true
     path: /actuator/prometheus
     interval: 15s
-    # Map the pod-template hash onto a `version` label so dashboards can break
-    # metrics down PER RELEASE -- the whole point of the relabel on a
-    # blue/green app.
+    # Adds the pod-template hash as `pod_hash` and the delivery strategy as
+    # `strategy`.
+    #
+    # It deliberately does NOT write `version` or `color`. application.yml
+    # already exposes Micrometer common tags on every metric:
+    #     application="shopfast"  version="<git-sha>"  release_color="blue"
+    # A relabel targeting `version` OVERWRITES the app's Git SHA and the
+    # scraper renames the displaced value to `exported_version` -- observed
+    # live as version="64d7d69bb5" / exported_version="5274b56". Dashboards
+    # then key on an opaque ReplicaSet hash instead of the release identifier
+    # every other part of this system uses. Nothing errors; the data is just
+    # quietly wrong. So each producer owns a distinct label name.
     #
     # SPELLING, and it is subtle: the pod LABEL is hyphenated
     # (rollouts-pod-template-hash), but Prometheus service discovery converts

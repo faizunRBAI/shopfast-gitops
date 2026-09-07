@@ -1,0 +1,399 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-shopfast-releases
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "ShopFast"
+data:
+  # ==========================================================================
+  # RELEASE COMPARISON DASHBOARD
+  #
+  # Answers one question, the only one that matters during a promotion:
+  # is the NEW release healthier than the one it is replacing?
+  #
+  # Every golden-signal panel groups by `version`, so a blue/green cutover
+  # shows two series side by side instead of one blended average that hides
+  # a regression behind the healthy release's traffic.
+  #
+  # LABEL VOCABULARY — every label below was verified against the live store
+  # AND the pod's raw /actuator/prometheus output before this shipped.
+  #
+  #   FROM THE APP (Micrometer common tags, application.yml):
+  #     application    "shopfast"
+  #     version        the GIT SHA, e.g. "5274b56"   <- the release key
+  #     release_color  blue | green
+  #
+  #   FROM THE SCRAPE (chart relabelConfigs):
+  #     pod_hash       pod-template hash, e.g. "64d7d69bb5"
+  #     strategy       standard | bluegreen | canary
+  #
+  #   FROM SERVICE DISCOVERY:
+  #     namespace  job  service  pod  container  endpoint  instance
+  #
+  # WHY version IS THE GIT SHA AND NOT THE POD HASH
+  # -----------------------------------------------
+  # An earlier revision of the scrape relabelled the pod-template hash onto
+  # `version`, which OVERWROTE the app's own tag; the scraper renamed the
+  # displaced value to `exported_version`. The result looked correct and was
+  # not: panels keyed on an opaque ReplicaSet hash while the Git SHA — the
+  # identifier used by the image tag, the rollback workflow and the label-sync
+  # CronJob — sat in a label nobody queried. The relabel now writes `pod_hash`,
+  # so each producer owns a distinct name and no label is clobbered.
+  #
+  # `up` CARRIES NO APP TAGS. It is synthesised by the scraper, so it has
+  # pod_hash and strategy but NOT version/release_color. Inventory panels that
+  # need the release identity therefore query an app metric
+  # (process_uptime_seconds), never `up`. Querying up{version=...} returns
+  # empty and looks exactly like an outage.
+  #
+  # JOB SELECTION — bluegreen renders TWO Services over the SAME pods:
+  #   job="shopfast"          active Service  (production traffic)
+  #   job="shopfast-preview"  preview Service (pre-promotion validation)
+  # Rate panels select job="shopfast" only; selecting on namespace would
+  # double every measurement.
+  #
+  # THE ZERO-FALLBACK ON RATIO PANELS
+  # ---------------------------------
+  # A plain errors/total ratio returns NOTHING when there are no errors,
+  # because the numerator has no series to divide. On the panel that IS your
+  # abort criterion, "no data" and "zero errors" would then look identical —
+  # the worst possible ambiguity during a promotion decision. Each ratio
+  # numerator therefore carries:
+  #     ... or 0 * <the same aggregation over ALL requests>
+  # yielding a genuine 0 that KEEPS the version label. `or vector(0)` also
+  # produces a zero but drops every label, collapsing the per-release
+  # breakdown into one unlabelled line. Verified against the live store.
+  # ==========================================================================
+  shopfast-releases.json: |
+    {
+      "title": "ShopFast — Release Comparison",
+      "uid": "shopfast-releases",
+      "tags": ["shopfast", "release", "bluegreen", "canary"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": { "from": "now-3h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {}
+          },
+          {
+            "name": "version",
+            "type": "query",
+            "label": "Release (git SHA)",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": "label_values(process_uptime_seconds{job=\"shopfast\"}, version)",
+            "refresh": 2,
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": "$__all" }
+          },
+          {
+            "name": "release_color",
+            "type": "query",
+            "label": "Colour",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": "label_values(process_uptime_seconds{job=\"shopfast\"}, release_color)",
+            "refresh": 2,
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Release inventory",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "type": "stat",
+          "title": "Releases in flight",
+          "description": "Distinct git SHAs currently serving on the ACTIVE Service. 1 = steady state. 2 = a rollout is in progress or the old colour has not finished draining.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 2 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "count(count by (version) (process_uptime_seconds{job=\"shopfast\"}))",
+              "legendFormat": "releases",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Delivery strategy",
+          "description": "From the scrape relabel, so it reflects what the chart actually rendered — not what anyone believes is configured.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 5, "x": 5, "y": 1 },
+          "options": { "textMode": "name" },
+          "targets": [
+            {
+              "expr": "count by (strategy) (up{job=\"shopfast\",strategy!=\"\"} == 1)",
+              "legendFormat": "{{strategy}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Pods per release",
+          "description": "Replica count by git SHA and colour. The pod_hash label distinguishes two ReplicaSets of the same SHA.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 7, "x": 10, "y": 1 },
+          "targets": [
+            {
+              "expr": "count by (version, release_color) (process_uptime_seconds{job=\"shopfast\",version=~\"$version\",release_color=~\"$release_color\"})",
+              "legendFormat": "{{version}} / {{release_color}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Pods in preview",
+          "description": "Pods behind the preview Service — the release awaiting promotion during blue/green. Once promotion completes both Services select the same pods, so this matching the active release is the normal steady state.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 7, "x": 17, "y": 1 },
+          "targets": [
+            {
+              "expr": "count by (version) (process_uptime_seconds{job=\"shopfast-preview\"})",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Release timeline — pods per version",
+          "description": "The cutover, drawn. During a blue/green promotion the old SHA's band falls to zero as the new one rises; the overlap is blueGreen.scaleDownDelaySeconds.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 24, "x": 0, "y": 5 },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" }, "lineWidth": 1 },
+              "min": 0
+            }
+          },
+          "targets": [
+            {
+              "expr": "count by (version) (process_uptime_seconds{job=\"shopfast\",version=~\"$version\"})",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "title": "Golden signals by release",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 12 },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "type": "timeseries",
+          "title": "Traffic — req/s by version",
+          "description": "Golden signal 1. A new release receiving no traffic is not yet promoted; an old release still receiving traffic after promotion has not finished draining.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+          "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } },
+          "targets": [
+            {
+              "expr": "sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\"}[2m]))",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Errors — 5xx % by version",
+          "description": "Golden signal 2, and THE abort criterion: if the new SHA's line sits above the old one's, do not promote. A healthy release plots a real 0 rather than 'No data'. Red above 5%.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 5 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "100 * (sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\",status=~\"5..\"}[5m])) or 0 * sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\"}[5m]))) / clamp_min(sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\"}[5m])), 0.001)",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Client errors — 4xx % by version",
+          "description": "Separated from 5xx deliberately. A release that starts returning 404s on routes the previous one served is a broken deployment even though nothing technically errored.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0 } },
+          "targets": [
+            {
+              "expr": "100 * (sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\",status=~\"4..\"}[5m])) or 0 * sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\"}[5m]))) / clamp_min(sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\"}[5m])), 0.001)",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency — mean seconds by version",
+          "description": "Golden signal 3. Micrometer exposes http_server_requests_seconds here as sum+count with NO histogram buckets (percentiles-histogram is not enabled), so this is a true mean — not an approximated p95. Honest arithmetic beats a percentile the data cannot support.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+          "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
+          "targets": [
+            {
+              "expr": "sum by (version) (rate(http_server_requests_seconds_sum{job=\"shopfast\",version=~\"$version\"}[5m])) / clamp_min(sum by (version) (rate(http_server_requests_seconds_count{job=\"shopfast\",version=~\"$version\"}[5m])), 0.001)",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Worst-case latency by version",
+          "description": "http_server_requests_seconds_max — the slowest request observed in the interval. Catches a tail regression the mean hides.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 29 },
+          "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
+          "targets": [
+            {
+              "expr": "max by (version) (http_server_requests_seconds_max{job=\"shopfast\",version=~\"$version\"})",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Saturation — in-flight requests by version",
+          "description": "Golden signal 4. Rising active requests with flat throughput means the new release is queueing.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 29 },
+          "fieldConfig": { "defaults": { "min": 0 } },
+          "targets": [
+            {
+              "expr": "sum by (version) (http_server_requests_active_seconds_count{job=\"shopfast\",version=~\"$version\"})",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Error logs — events/s by version",
+          "description": "logback_events_total at ERROR level. A release can return 200s while logging exceptions; this catches what the 5xx panel cannot.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 29 },
+          "fieldConfig": { "defaults": { "min": 0 } },
+          "targets": [
+            {
+              "expr": "sum by (version) (rate(logback_events_total{job=\"shopfast\",version=~\"$version\",level=\"error\"}[5m]))",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "title": "Runtime health by release",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "type": "timeseries",
+          "title": "JVM heap used by version",
+          "description": "A memory regression is the classic reason a release looks fine for ten minutes and then does not. Compare the SLOPES, not the absolute values — a freshly started release always starts low.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 37 },
+          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } },
+          "targets": [
+            {
+              "expr": "sum by (version) (jvm_memory_used_bytes{job=\"shopfast\",version=~\"$version\",area=\"heap\"})",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "GC pause time by version",
+          "description": "Seconds spent paused per second of wall clock. A rise here explains a latency regression that the application code does not.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 37 },
+          "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
+          "targets": [
+            {
+              "expr": "sum by (version) (rate(jvm_gc_pause_seconds_sum{job=\"shopfast\",version=~\"$version\"}[5m]))",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Process uptime by version",
+          "description": "Identifies which release is new. A line resetting to zero is a restart — during a rollout that is expected, afterwards it is a crash loop.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 37 },
+          "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
+          "targets": [
+            {
+              "expr": "max by (version) (process_uptime_seconds{job=\"shopfast\",version=~\"$version\"})",
+              "legendFormat": "{{version}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Container restarts by pod",
+          "description": "Kubernetes-side view. kube-state-metrics carries no version label, so this is per pod — the pod name embeds the pod_hash.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 24, "x": 0, "y": 44 },
+          "fieldConfig": { "defaults": { "min": 0 } },
+          "targets": [
+            {
+              "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=\"shopfast\"}[15m]))",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

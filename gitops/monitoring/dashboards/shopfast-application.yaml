@@ -8,6 +8,28 @@ metadata:
   annotations:
     grafana_folder: "ShopFast"
 data:
+  # ==========================================================================
+  # NO HISTOGRAM BUCKETS EXIST ON THIS APP — verified 2026-09-07:
+  #   /api/v1/series?match[]=http_server_requests_seconds_bucket  ->  []
+  #
+  # Spring Boot publishes http_server_requests_seconds as sum + count + max
+  # only. Buckets require
+  #   management.metrics.distribution.percentiles-histogram.http.server.requests: true
+  # which is NOT enabled here. An earlier revision of this dashboard used
+  # histogram_quantile(0.95, ...http_server_requests_seconds_bucket...) on
+  # three panels; every one rendered permanently empty, because
+  # histogram_quantile over a non-existent metric returns no series and does
+  # not error.
+  #
+  # Those panels now show the MEAN (sum/count) and the observed MAX, both of
+  # which the exposed data genuinely supports. That is a deliberate choice:
+  # a real mean beats a percentile the data cannot produce. Enabling buckets
+  # is an application change with a cardinality cost — worth doing when
+  # latency SLOs are defined, not before.
+  #
+  # `up` carries NO app tags (it is synthesised by the scraper), so the
+  # pod-count panel selects on job, not application.
+  # ==========================================================================
   shopfast-application.json: |
     {
       "title": "ShopFast — Application (Spring Boot)",
@@ -31,10 +53,11 @@ data:
         {
           "type": "stat",
           "title": "Up pods",
+          "description": "Selects on job, not application: `up` is synthesised by the scraper and carries no Micrometer common tags.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
           "targets": [
-            { "expr": "count(up{application=\"shopfast\"} == 1)", "refId": "A" }
+            { "expr": "count(up{job=\"shopfast\"} == 1)", "refId": "A" }
           ]
         },
         {
@@ -42,18 +65,21 @@ data:
           "title": "Request rate (req/s)",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 4, "w": 5, "x": 4, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
           "targets": [
-            { "expr": "sum(rate(http_server_requests_seconds_count{application=\"shopfast\"}[5m]))", "refId": "A" }
+            { "expr": "sum(rate(http_server_requests_seconds_count{job=\"shopfast\"}[5m]))", "refId": "A" }
           ]
         },
         {
           "type": "stat",
           "title": "Error rate (5xx %)",
+          "description": "The `or vector(0)` fallback is safe here because this panel is a single unlabelled aggregate — no per-release breakdown to preserve.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 4, "w": 5, "x": 9, "y": 0 },
           "fieldConfig": {
             "defaults": {
               "unit": "percent",
+              "min": 0,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -66,20 +92,21 @@ data:
           },
           "targets": [
             {
-              "expr": "100 * sum(rate(http_server_requests_seconds_count{application=\"shopfast\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{application=\"shopfast\"}[5m])), 0.001)",
+              "expr": "100 * (sum(rate(http_server_requests_seconds_count{job=\"shopfast\",status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(http_server_requests_seconds_count{job=\"shopfast\"}[5m])), 0.001)",
               "refId": "A"
             }
           ]
         },
         {
           "type": "stat",
-          "title": "p95 latency",
+          "title": "Mean latency",
+          "description": "sum/count. Not a percentile — this app exposes no histogram buckets.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 4, "w": 5, "x": 14, "y": 0 },
           "fieldConfig": { "defaults": { "unit": "s" } },
           "targets": [
             {
-              "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{application=\"shopfast\"}[5m])) by (le))",
+              "expr": "sum(rate(http_server_requests_seconds_sum{job=\"shopfast\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{job=\"shopfast\"}[5m])), 0.001)",
               "refId": "A"
             }
           ]
@@ -98,9 +125,10 @@ data:
           "title": "Request rate by URI",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } },
           "targets": [
             {
-              "expr": "sum(rate(http_server_requests_seconds_count{application=\"shopfast\"}[5m])) by (uri)",
+              "expr": "sum by (uri) (rate(http_server_requests_seconds_count{job=\"shopfast\"}[5m]))",
               "legendFormat": "{{uri}}",
               "refId": "A"
             }
@@ -108,14 +136,27 @@ data:
         },
         {
           "type": "timeseries",
-          "title": "Latency p50 / p95 / p99",
+          "title": "Latency — mean and worst case",
+          "description": "Replaces the previous p50/p95/p99 panel, which queried http_server_requests_seconds_bucket — a metric this app does not expose, so it was always empty. Mean is sum/count; max is the slowest request Micrometer observed in the interval.",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-          "fieldConfig": { "defaults": { "unit": "s" } },
+          "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
           "targets": [
-            { "expr": "histogram_quantile(0.50, sum(rate(http_server_requests_seconds_bucket{application=\"shopfast\"}[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
-            { "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{application=\"shopfast\"}[5m])) by (le))", "legendFormat": "p95", "refId": "B" },
-            { "expr": "histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{application=\"shopfast\"}[5m])) by (le))", "legendFormat": "p99", "refId": "C" }
+            {
+              "expr": "sum(rate(http_server_requests_seconds_sum{job=\"shopfast\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{job=\"shopfast\"}[5m])), 0.001)",
+              "legendFormat": "mean",
+              "refId": "A"
+            },
+            {
+              "expr": "max(http_server_requests_seconds_max{job=\"shopfast\"})",
+              "legendFormat": "max",
+              "refId": "B"
+            },
+            {
+              "expr": "max by (uri) (http_server_requests_seconds_max{job=\"shopfast\"})",
+              "legendFormat": "max {{uri}}",
+              "refId": "C"
+            }
           ]
         },
         {
@@ -123,10 +164,10 @@ data:
           "title": "JVM heap used",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
-          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } },
           "targets": [
             {
-              "expr": "sum(jvm_memory_used_bytes{application=\"shopfast\",area=\"heap\"}) by (pod)",
+              "expr": "sum by (pod) (jvm_memory_used_bytes{job=\"shopfast\",area=\"heap\"})",
               "legendFormat": "{{pod}}",
               "refId": "A"
             }
@@ -137,9 +178,10 @@ data:
           "title": "GC pause rate",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+          "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
           "targets": [
             {
-              "expr": "sum(rate(jvm_gc_pause_seconds_sum{application=\"shopfast\"}[5m])) by (action)",
+              "expr": "sum by (action) (rate(jvm_gc_pause_seconds_sum{job=\"shopfast\"}[5m]))",
               "legendFormat": "{{action}}",
               "refId": "A"
             }
@@ -150,9 +192,10 @@ data:
           "title": "Live threads",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+          "fieldConfig": { "defaults": { "min": 0 } },
           "targets": [
             {
-              "expr": "sum(jvm_threads_live_threads{application=\"shopfast\"}) by (pod)",
+              "expr": "sum by (pod) (jvm_threads_live_threads{job=\"shopfast\"})",
               "legendFormat": "{{pod}}",
               "refId": "A"
             }
