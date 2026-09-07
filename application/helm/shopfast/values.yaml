@@ -1,1 +1,157 @@
-None
+# ---------------------------------------------------------------------------
+# CHART DEFAULTS — the base layer.
+#
+# These are the chart's own defaults. The DEPLOYED state lives in
+# gitops/applications/shopfast/values.yaml, which Argo CD layers on top of this
+# file and which CI rewrites on every build. Anything environment-specific
+# (registry, image tag, certificate ARN, host) belongs THERE, not here.
+#
+# Every key the templates dereference MUST exist in this file. Helm does not
+# error on a missing key -- it renders empty -- so an omission here becomes a
+# silently malformed object in the cluster.
+# ---------------------------------------------------------------------------
+
+# Delivery strategy. The chart default is the SAFE one: a plain Deployment,
+# which needs no Argo Rollouts CRDs to be installed.
+#   standard  -> Deployment          (templates/deployment.yaml)
+#   bluegreen -> Rollout, manual promotion of the new colour
+#   canary    -> Rollout, weighted progressive traffic shift
+# _validate.tpl refuses anything else. Exactly one workload object is ever
+# rendered; scripts/verify-chart-exclusivity.sh asserts that in CI.
+strategy: standard
+
+replicaCount: 3
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Overridden by the Application values; CI writes the real ECR registry.
+  repository: PLACEHOLDER_REGISTRY/shopfast
+  # _validate.tpl REFUSES "latest" and "" -- the deployed tag must be an
+  # immutable Git SHA so the running revision is always knowable.
+  tag: "bootstrap"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+release:
+  # Surfaced as SHOPFAST_RELEASE_COLOR and the shopfast.xyz/color pod label;
+  # the landing page renders it, which is how a blue/green flip is visible.
+  color: blue
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  # Port the Service publishes; the Ingress backend references this.
+  port: 80
+  # Container port. Spring Boot listens on 8080; the "http" named port used by
+  # both probes and the ServiceScrape resolves to this.
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: alb
+  host: shopfast.royalbengal.xyz
+  # Written by CI (scripts/set-app-cert.py) from the ACM certificate ARN in
+  # terraform state. _validate.tpl requires it whenever the ALB ingress is on,
+  # because HTTPS is mandatory for this app.
+  certificateArn: ""
+  annotations: {}
+
+blueGreen:
+  # Manual promotion by default: a human verifies the preview colour before it
+  # takes production traffic.
+  autoPromotionEnabled: false
+  autoPromotionSeconds: 0
+  # Keep the old colour alive briefly after promotion so rollback is instant.
+  scaleDownDelaySeconds: 30
+  # Gate promotion on the AnalysisTemplate. Off by default: a first deploy has
+  # no metric history to judge.
+  prePromotionAnalysis: false
+
+canary:
+  analysis: false
+  steps:
+    - setWeight: 20
+    - pause: { duration: 60s }
+    - setWeight: 50
+    - pause: { duration: 120s }
+    - setWeight: 80
+    - pause: { duration: 60s }
+
+analysis:
+  # Consulted only when blueGreen.prePromotionAnalysis or canary.analysis is on.
+  intervalSeconds: 30
+  count: 5
+  successRateThreshold: 0.95
+  prometheusAddress: http://vmsingle-vm.monitoring.svc.cluster.local:8429
+
+probes:
+  # Spring Boot Actuator splits liveness and readiness; using the split
+  # endpoints means a slow-starting JVM is not killed before it is ready.
+  liveness:
+    path: /actuator/health/liveness
+    initialDelaySeconds: 45
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 6
+  readiness:
+    path: /actuator/health/readiness
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    # Memory limit only. A CPU limit throttles the JVM during startup and makes
+    # the readiness probe flap on a cold start.
+    memory: 1Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+metrics:
+  serviceScrape:
+    # Emits a VictoriaMetrics ServiceScrape so the app's Actuator metrics are
+    # collected. Requires the VM operator CRDs (installed by the monitoring app).
+    enabled: true
+    path: /actuator/prometheus
+    interval: 15s
+    # Map the pod-template hash onto a `version` label so dashboards can break
+    # metrics down PER RELEASE -- the whole point of the relabel on a
+    # blue/green app.
+    #
+    # SPELLING, and it is subtle: the pod LABEL is hyphenated
+    # (rollouts-pod-template-hash), but Prometheus service discovery converts
+    # every non-alphanumeric character to an underscore when it exposes labels
+    # as __meta_kubernetes_pod_label_*. So the relabel SOURCE must use
+    # UNDERSCORES. Written with hyphens it matches nothing and does not
+    # error -- it silently emits an empty label.
+    relabelVersion: true
+
+env: []
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,1 +1,36 @@
-None
+# Label-sync CronJob.
+#
+# Helm stamps app.kubernetes.io/version from the CHART version (1.0.0), not the
+# running image tag, so the Argo CD console shows a version label that has no
+# relationship to what is actually deployed. This CronJob reads the container
+# image off the live workload every minute and patches the label to match.
+#
+# repoURL is committed literally — see the note in shopfast.yaml. A placeholder
+# substituted at apply time is reverted by the root App-of-Apps on its next
+# sync, leaving this Application unable to resolve its own source.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: label-sync
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # After the app itself (wave 20) — there is nothing to relabel before then.
+    argocd.argoproj.io/sync-wave: "25"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/faizunRBAI/shopfast-gitops.git
+    targetRevision: main
+    path: gitops/label-sync
+  destination:
+    server: https://kubernetes.default.svc
+    # Runs in the namespace it patches, so its RBAC stays namespace-scoped.
+    namespace: shopfast
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

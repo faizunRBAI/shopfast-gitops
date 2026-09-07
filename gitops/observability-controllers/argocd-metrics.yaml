@@ -1,1 +1,129 @@
-None
+# ---------------------------------------------------------------------------
+# ARGO CD CONTROLLER METRICS — Service + ServiceScrape pairs.
+#
+# WHY A SERVICE IS NEEDED AT ALL
+#   The Argo CD Helm chart exposes each component's metrics on a CONTAINER
+#   PORT but ships no Service in front of them (metrics.service.enabled is off
+#   by default, and the application-controller has no Service whatsoever).
+#   A VMServiceScrape selects ENDPOINTS, which only exist behind a Service — so
+#   a scrape on its own would match nothing, collect nothing, and still report
+#   Healthy forever. Hence "Service + scrape", both, per component.
+#
+# EVERY PORT AND SELECTOR BELOW WAS READ OFF THE LIVE PODS, not assumed:
+#   application-controller  8082  app.kubernetes.io/name=argocd-application-controller
+#   server                  8083  app.kubernetes.io/name=argocd-server
+#   repo-server             8084  app.kubernetes.io/name=argocd-repo-server
+#
+# These Services are metrics-only: ClusterIP, single port, no ingress. They do
+# not front the Argo CD API or UI.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-application-controller-metrics
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-application-controller-metrics
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 8082
+      targetPort: 8082
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argocd-application-controller
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: argocd-application-controller
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - argocd
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-application-controller-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-server-metrics
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-server-metrics
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 8083
+      targetPort: 8083
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argocd-server
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: argocd-server
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - argocd
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-server-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-repo-server-metrics
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-repo-server-metrics
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 8084
+      targetPort: 8084
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argocd-repo-server
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - argocd
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-repo-server-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

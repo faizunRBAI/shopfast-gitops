@@ -1,1 +1,121 @@
-None
+# ---------------------------------------------------------------------------
+# LABEL SYNC — keeps the Argo CD console's version label honest.
+#
+# WHY THIS EXISTS
+#   Helm renders app.kubernetes.io/version from .Chart.AppVersion, which is a
+#   constant in Chart.yaml. The image tag, meanwhile, is rewritten by CI on
+#   every build. So the console reports:
+#       app.kubernetes.io/version: 1.0.0     while pods run :5274b56
+#   This job copies the real tag off the running container onto the label.
+#
+# IMAGE CHOICE
+#   bitnami/kubectl: it ships a shell AND kubectl. A distroless kubectl image
+#   cannot run this script at all — there is no /bin/sh to interpret it.
+#   Pinned to an explicit version tag, never "latest": a floating tag makes the
+#   behaviour of this job change underneath you without a commit.
+# ---------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: label-sync
+  namespace: shopfast
+  labels:
+    app.kubernetes.io/name: label-sync
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  schedule: "* * * * *"
+  # Never let a slow run pile up behind the previous one.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  # A run that has not completed in 2 minutes is stuck; kill it.
+  startingDeadlineSeconds: 60
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: label-sync
+        spec:
+          serviceAccountName: label-sync
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: label-sync
+              image: docker.io/bitnami/kubectl:1.31.3
+              # The tag is mutable upstream, so always re-resolve it. (A digest
+              # pin would be stronger, but it must be READ from the registry —
+              # a digest written from memory is ImagePullBackOff forever.)
+              imagePullPolicy: Always
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+
+                  NS=shopfast
+                  NAME=shopfast
+
+                  # Find the workload. Exactly one of these exists: a Rollout
+                  # under bluegreen/canary, a Deployment under standard.
+                  KIND=""
+                  if kubectl -n "$NS" get rollout "$NAME" >/dev/null 2>&1; then
+                    KIND=rollout
+                  elif kubectl -n "$NS" get deployment "$NAME" >/dev/null 2>&1; then
+                    KIND=deployment
+                  fi
+
+                  if [ -z "$KIND" ]; then
+                    echo "no rollout or deployment named $NAME in $NS; nothing to do"
+                    exit 0
+                  fi
+
+                  IMAGE=$(kubectl -n "$NS" get "$KIND" "$NAME" \
+                    -o jsonpath='{.spec.template.spec.containers[0].image}')
+
+                  # Strip everything before the last colon to get the tag. Guard
+                  # against a digest-pinned image (repo@sha256:...), which has
+                  # no tag to publish.
+                  case "$IMAGE" in
+                    *@sha256:*)
+                      echo "image is digest-pinned ($IMAGE); no tag to sync"
+                      exit 0
+                      ;;
+                  esac
+
+                  TAG=${IMAGE##*:}
+
+                  if [ -z "$TAG" ] || [ "$TAG" = "$IMAGE" ]; then
+                    echo "could not parse a tag from '$IMAGE'; leaving label alone"
+                    exit 0
+                  fi
+
+                  CURRENT=$(kubectl -n "$NS" get "$KIND" "$NAME" \
+                    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}')
+
+                  if [ "$CURRENT" = "$TAG" ]; then
+                    echo "label already correct ($TAG); no patch needed"
+                    exit 0
+                  fi
+
+                  echo "patching $KIND/$NAME version label: '$CURRENT' -> '$TAG'"
+                  kubectl -n "$NS" patch "$KIND" "$NAME" --type=merge \
+                    -p "{\"metadata\":{\"labels\":{\"app.kubernetes.io/version\":\"$TAG\"}}}"

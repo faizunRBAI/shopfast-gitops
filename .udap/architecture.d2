@@ -1,1 +1,44 @@
-None
+# udap:meta cloud=aws region=us-east-1 target=eks
+
+user: Customer { shape: person; udap-type: generic.user }
+operator: Operator / Owner { shape: person; udap-type: generic.user }
+github: GitHub Repository { shape: rectangle; udap-type: generic.app }
+actions: GitHub Actions CI { shape: rectangle; udap-type: generic.app }
+ecr: ECR Image Registry { shape: rectangle; udap-type: aws.ecr }
+acm: ACM Certificate { shape: rectangle; udap-type: aws.acm }
+dns: Route 53 Hosted Zone { shape: rectangle; udap-type: aws.route53 }
+vpc: VPC 10.0.0.0/16 {
+  alb: Application Load Balancer { shape: rectangle; udap-type: aws.alb }
+  argocd: Argo CD { shape: rectangle; udap-type: generic.app }
+  rollouts: Argo Rollouts Controller { shape: rectangle; udap-type: generic.app }
+  labelsync: Label-Sync CronJob { shape: rectangle; udap-type: generic.app }
+  active: ShopFast Active Service { shape: rectangle; udap-type: generic.app }
+  preview: ShopFast Preview Service { shape: rectangle; udap-type: generic.app }
+  pods: ShopFast Pods Spring Boot { shape: rectangle; udap-type: aws.eks }
+  vm: VictoriaMetrics in-cluster { shape: rectangle; udap-type: generic.app }
+  grafana: Grafana { shape: rectangle; udap-type: generic.app }
+}
+
+user -> dns: resolve shopfast.royalbengal.xyz
+operator -> dns: resolve argocd / grafana
+dns -> vpc.alb: A record
+acm -> vpc.alb: TLS certificate
+vpc.alb -> vpc.active: HTTPS 443 to 8080
+vpc.alb -> vpc.argocd: dashboard
+vpc.alb -> vpc.grafana: dashboard
+vpc.active -> vpc.pods: stable traffic
+vpc.preview -> vpc.pods: pre-promotion verify
+github -> actions: push to main
+actions -> ecr: build and push image tag
+actions -> github: commit new tag to values
+github -> vpc.argocd: poll desired state
+vpc.argocd -> vpc.rollouts: apply Rollout
+vpc.rollouts -> vpc.pods: blue green promotion
+vpc.rollouts -> vpc.active: switch active colour
+vpc.rollouts -> vpc.preview: point at new colour
+ecr -> vpc.pods: pull image
+vpc.labelsync -> vpc.pods: patch version label
+vpc.vm -> vpc.pods: scrape app metrics
+vpc.vm -> vpc.argocd: scrape controller metrics
+vpc.vm -> vpc.rollouts: scrape controller metrics
+vpc.grafana -> vpc.vm: query

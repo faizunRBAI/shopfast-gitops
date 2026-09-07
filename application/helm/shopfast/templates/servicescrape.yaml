@@ -1,1 +1,68 @@
-None
+{{- include "shopfast.validate" . }}
+{{- if .Values.metrics.serviceScrape.enabled }}
+{{/*
+============================================================================
+ ServiceScrape — VictoriaMetrics operator CRD (the VM equivalent of a
+ Prometheus ServiceMonitor). Selects the ACTIVE Service, so it follows
+ whichever colour currently serves production traffic.
+
+ THE VERSION RELABEL
+ -------------------
+ Without relabelling, every pod's metrics carry the same label set and a
+ dashboard cannot tell the old release from the new one — which defeats the
+ purpose of blue/green. These rules copy the pod-template hash onto a
+ `version` label, plus the strategy and colour.
+
+ SPELLING — this is the trap. The Kubernetes pod LABEL is hyphenated:
+     rollouts-pod-template-hash   (Rollouts)
+     pod-template-hash            (plain Deployment)
+ but service discovery exposes labels as __meta_kubernetes_pod_label_<name>
+ with every non-alphanumeric character converted to an UNDERSCORE. So the
+ sourceLabels below MUST use underscores. Written with hyphens they match
+ nothing, emit an empty `version`, and DO NOT ERROR.
+
+ Both hashes are listed because the chart renders a Rollout for
+ bluegreen/canary and a Deployment for standard; exactly one of the two
+ labels exists on any given pod, and the regex keeps whichever is non-empty.
+============================================================================
+*/}}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "shopfast.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.metrics.serviceScrape.path | quote }}
+      interval: {{ .Values.metrics.serviceScrape.interval }}
+      {{- if .Values.metrics.serviceScrape.relabelVersion }}
+      relabelConfigs:
+        # Rollouts pods: rollouts-pod-template-hash -> version
+        - sourceLabels: [__meta_kubernetes_pod_label_rollouts_pod_template_hash]
+          regex: (.+)
+          targetLabel: version
+          replacement: $1
+          action: replace
+        # Deployment pods (strategy=standard): pod-template-hash -> version
+        - sourceLabels: [__meta_kubernetes_pod_label_pod_template_hash]
+          regex: (.+)
+          targetLabel: version
+          replacement: $1
+          action: replace
+        # Release colour, so a dashboard can split blue vs green directly.
+        - sourceLabels: [__meta_kubernetes_pod_label_shopfast_xyz_color]
+          regex: (.+)
+          targetLabel: color
+          replacement: $1
+          action: replace
+        # Delivery strategy in effect when the sample was taken.
+        - targetLabel: strategy
+          replacement: {{ .Values.strategy | quote }}
+          action: replace
+      {{- end }}
+{{- end }}

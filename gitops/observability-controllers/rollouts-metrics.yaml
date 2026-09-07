@@ -1,1 +1,49 @@
-None
+# ---------------------------------------------------------------------------
+# ARGO ROLLOUTS CONTROLLER METRICS — Service + ServiceScrape.
+#
+# Same shape and same reason as argocd-metrics.yaml: the controller publishes
+# metrics on a container port with no Service in front, so a scrape alone would
+# select no endpoints and silently collect nothing.
+#
+# Port 8090 and the selector were READ off the live pod:
+#   app.kubernetes.io/name=argo-rollouts, container port "metrics" 8090
+#
+# These are the signals that tell you a rollout is progressing, paused awaiting
+# promotion, or aborted — the blue/green story this project is built around.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: argo-rollouts-metrics
+  namespace: argo-rollouts
+  labels:
+    app.kubernetes.io/name: argo-rollouts-metrics
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 8090
+      targetPort: 8090
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argo-rollouts
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: argo-rollouts
+  namespace: argo-rollouts
+  labels:
+    app.kubernetes.io/part-of: shopfast-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - argo-rollouts
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argo-rollouts-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
