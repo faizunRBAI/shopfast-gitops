@@ -49,7 +49,7 @@ jobs:
       TF_VAR_argocd_hostname: argocd.shopfast.royalbengal.xyz
       TF_VAR_app_hostname: shopfast.royalbengal.xyz
       TF_VAR_grafana_hostname: grafana.shopfast.royalbengal.xyz
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
     - uses: actions/checkout@v4
     - name: Set up Helm
@@ -85,8 +85,17 @@ jobs:
         distribution: temurin
         java-version: '21'
         cache: maven
+    - name: Restore the NVD vulnerability database
+      uses: actions/cache@v4
+      with:
+        path: ~/.dependency-check-data
+        key: nvd-db-${{ github.run_id }}
+        restore-keys: 'nvd-db-
+
+          '
     - name: OWASP dependency vulnerability scan (reporting mode)
       run: bash scripts/dependency-scan.sh
+      timeout-minutes: 25
       env:
         NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
     - name: Upload dependency-check report

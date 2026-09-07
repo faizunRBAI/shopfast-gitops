@@ -38,7 +38,7 @@ stages:
   - id: security
     kind: security
     needs: [test]
-    timeout_minutes: 30
+    timeout_minutes: 45
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -82,7 +82,22 @@ stages:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Restore the NVD vulnerability database
+        uses: actions/cache@v4
+        with:
+          # Downloading the full NVD feed is ~387,000 records. It took ~4min on
+          # 2026-09-06 and had reached only 26% after 30min on 2026-09-07, which
+          # cancelled this stage at its timeout. Feed throughput is not ours to
+          # control, so we stop re-downloading it: dependency-check restores this
+          # directory and fetches only the delta since the cached snapshot.
+          # The date suffix rolls the cache daily; restore-keys means a run always
+          # starts from yesterday's database rather than from empty.
+          path: ~/.dependency-check-data
+          key: nvd-db-${{ github.run_id }}
+          restore-keys: |
+            nvd-db-
       - name: OWASP dependency vulnerability scan (reporting mode)
+        timeout-minutes: 25
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: bash scripts/dependency-scan.sh

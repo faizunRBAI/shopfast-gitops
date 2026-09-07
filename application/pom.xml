@@ -39,6 +39,23 @@
         <dependency-check.version>12.1.0</dependency-check.version>
 
         <!--
+          NVD database location — pinned so CI can CACHE it.
+
+          dependency-check defaults this to ~/.m2/repository/org/owasp/
+          dependency-check-data/<n>/, which the maven cache key (keyed on
+          pom.xml) does not reliably preserve. Downloading the full NVD feed is
+          ~387,000 records: it completed in about four minutes on 2026-09-06 and
+          had reached only 26% after THIRTY minutes on 2026-09-07, which
+          cancelled the security stage at its timeout. The feed's throughput is
+          not ours to control, so the durable fix is to stop re-downloading it.
+
+          With this path pinned, the security stage restores the directory from
+          the Actions cache and dependency-check fetches only the delta since
+          the cached snapshot.
+        -->
+        <nvd.data.directory>${user.home}/.dependency-check-data</nvd.data.directory>
+
+        <!--
           ====================================================================
           ACCEPTED RISK — dependency-check runs in REPORTING mode.
           Decision: project owner, 2026-09-06.
@@ -125,6 +142,9 @@
                     <!-- See the security.failBuildOnCVSS property above for the
                          accepted-risk rationale and the revisit condition. -->
                     <failBuildOnCVSS>${security.failBuildOnCVSS}</failBuildOnCVSS>
+                    <!-- Cacheable NVD location — see the nvd.data.directory
+                         property above for why this is pinned. -->
+                    <dataDirectory>${nvd.data.directory}</dataDirectory>
                     <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
                     <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>
                     <!--
