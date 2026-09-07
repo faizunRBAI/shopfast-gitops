@@ -53,3 +53,39 @@ spec:
       kind: Rollout
       jsonPointers:
         - /spec/replicas
+
+    # ------------------------------------------------------------------
+    # TWO WRITERS ON ONE LABEL — this entry is what keeps them apart.
+    #
+    # Helm renders app.kubernetes.io/version from .Chart.AppVersion, a
+    # CONSTANT in Chart.yaml ("1.0.0"). The label-sync CronJob overwrites it
+    # every minute with the tag actually running ("5274b56"), because the
+    # constant is useless in the Argo CD console.
+    #
+    # With selfHeal: true and no exception, those two writers fight:
+    #   :00  CronJob patches 1.0.0 -> 5274b56
+    #   :00  selfHeal sees drift from git and reverts to 1.0.0
+    # Observed live at autoHealAttemptsCount 4 and climbing within minutes.
+    # This is the SAME failure shape as the rollouts managed-by annotation
+    # loop that once reached 102 attempts.
+    #
+    # The rule: whoever legitimately owns a field at RUNTIME must be declared
+    # here, or selfHeal will treat their writes as drift forever. Rollouts
+    # owns /spec/replicas; label-sync owns this label.
+    #
+    # Scoped to the ONE label deliberately. Ignoring
+    # /metadata/labels wholesale would blind Argo to selector and
+    # part-of label drift, which it SHOULD catch.
+    # ------------------------------------------------------------------
+    - group: argoproj.io
+      kind: Rollout
+      name: shopfast
+      jsonPointers:
+        - /metadata/labels/app.kubernetes.io~1version
+
+    # Same field on the Deployment, for strategy=standard.
+    - group: apps
+      kind: Deployment
+      name: shopfast
+      jsonPointers:
+        - /metadata/labels/app.kubernetes.io~1version

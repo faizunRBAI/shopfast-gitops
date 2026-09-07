@@ -56,28 +56,37 @@ own collects nothing while still reporting Healthy.
 
 Ports, all read off live pods rather than assumed:
 
-| Component | Namespace | Port |
-|---|---|---|
-| application-controller | `argocd` | 8082 |
-| server | `argocd` | 8083 |
-| repo-server | `argocd` | 8084 |
-| rollouts-controller | `argo-rollouts` | 8090 |
+| Component | Namespace | Port | Selector |
+|---|---|---|---|
+| application-controller | `argocd` | 8082 | `name=argocd-application-controller` |
+| server | `argocd` | 8083 | `name=argocd-server` |
+| repo-server | `argocd` | 8084 | `name=argocd-repo-server` |
+| rollouts-controller | `argo-rollouts` | 8090 | `name=argo-rollouts` **+ `component=rollouts-controller`** |
+
+### The rollouts selector needs two labels
+
+The Rollouts **controller** and the Rollouts **dashboard** both carry
+`app.kubernetes.io/name: argo-rollouts`. They differ only by
+`app.kubernetes.io/component`.
+
+Selecting on `name` alone matches both. The dashboard serves the UI on 3100 and
+nothing on 8090, so it becomes a permanently failing scrape target whose
+failures are attributed to the controller. Caught here only because the Service
+came up with two endpoints while the controller has one replica.
 
 ### Verifying a scrape actually works
 
 A scrape that matches nothing looks identical to a healthy one in the Argo CD
-UI. The only real check is that the Service has endpoints:
+UI. The only real check is that the Service has endpoints — **and that the
+endpoint count matches the replica count**:
 
 ```
 kubectl -n argocd get endpoints argocd-application-controller-metrics
+kubectl -n argo-rollouts get endpoints argo-rollouts-metrics
 ```
 
-An empty `ENDPOINTS` column means the selector does not match the pods. Confirm
-with:
-
-```
-kubectl -n argocd get pod argocd-application-controller-0 -o jsonpath={.metadata.labels}
-```
+Empty `ENDPOINTS` means the selector matches nothing. *Too many* endpoints
+means it matches too much. Cross-check the IPs against `get pods -o wide`.
 
 ## Label-sync
 
@@ -92,9 +101,55 @@ already correct, and skips digest-pinned images, which have no tag to publish.
 Its RBAC is a namespace-scoped Role: `get`/`list`/`patch` on rollouts and
 deployments in `shopfast`, nothing else.
 
-**Image constraint:** it needs a shell *and* kubectl, so `bitnami/kubectl` —
-a distroless kubectl image has no `/bin/sh` and cannot run the script at all.
-The tag is pinned explicitly with `imagePullPolicy: Always`; never `latest`.
+### It REQUIRES a matching ignoreDifferences entry
+
+This is the part that is easy to miss and expensive to debug.
+
+`selfHeal: true` means Argo CD reverts anything that differs from git. Git says
+`1.0.0`. So without an exception the two writers fight, once a minute, forever:
+
+```
+:00  CronJob patches   1.0.0 -> 5274b56
+:00  selfHeal reverts  5274b56 -> 1.0.0
+```
+
+Observed live at `autoHealAttemptsCount: 4` within minutes of first enabling
+the job — the same failure shape as the rollouts `managed-by` annotation loop
+that once reached 102 attempts.
+
+The fix is in `gitops/apps/children/shopfast.yaml`: a scoped
+`ignoreDifferences` entry for that single label, on both the Rollout and the
+Deployment. Note the JSON Pointer escaping — `/` inside a key is `~1`:
+
+```yaml
+jsonPointers:
+  - /metadata/labels/app.kubernetes.io~1version
+```
+
+**The general rule:** any field a runtime controller legitimately owns must be
+declared in `ignoreDifferences`, or selfHeal treats every write as drift.
+Rollouts owns `/spec/replicas`; label-sync owns this label. Scope it to the one
+field — ignoring `/metadata/labels` wholesale would blind Argo to selector drift
+it *should* catch.
+
+### Image constraint
+
+It needs a shell *and* kubectl, so `bitnami/kubectl` — a distroless kubectl
+image has no `/bin/sh` and cannot run the script at all.
+
+It is pinned **by digest**, not by tag, because Bitnami no longer publishes
+versioned tags on the free Docker Hub tier. Verified against this cluster:
+
+```
+bitnami/kubectl:1.31.3 -> NotFound
+bitnami/kubectl:1.37.0 -> NotFound
+bitnami/kubectl:latest -> pulls, Client Version v1.37.0
+```
+
+`latest` is the only tag that resolves, and floating a job that runs 1440 times
+a day on a mutable tag is how it breaks silently later. To refresh the digest,
+pull `latest` and read back `.status.containerStatuses[0].imageID` — never write
+a `sha256:` from memory.
 
 ## Dashboards
 
