@@ -151,7 +151,7 @@ spec:
               alb.ingress.kubernetes.io/success-codes: "200"
               alb.ingress.kubernetes.io/group.name: shopfast-platform
               alb.ingress.kubernetes.io/group.order: "30"
-              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/faa631c6-ce37-4718-8421-9389eddf9f01"
+              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
 
           grafana.ini:
             server:
@@ -203,8 +203,34 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      # ServerSideApply is the field-ownership mechanism: Argo patches only the
+      # fields IT manages and leaves controller-written fields alone. That is
+      # what makes a chart with PersistentVolumeClaims syncable at all.
+      #
+      # Replace=true WAS SET HERE AND WAS REMOVED (2026-09-07). It makes Argo
+      # use `kubectl replace`, which posts the WHOLE object as the chart renders
+      # it and discards field ownership entirely. The Grafana PVC template
+      # declares neither volumeName nor storageClassName (it relies on the
+      # default gp3 class), but the binding controller writes both when the
+      # volume binds. Every sync therefore sent:
+      #     volumeName: "" , storageClassName: nil
+      # against a Bound claim, and the API server rejected it:
+      #     PersistentVolumeClaim "vm-grafana" is invalid: spec: Forbidden:
+      #     spec is immutable after creation except resources.requests ...
+      # 5 retries, ~25 minutes, failed forever. Nothing was broken in the
+      # cluster — Grafana kept running on the bound volume — but the app could
+      # never complete a sync, so it could not deliver any FUTURE change
+      # (notably the certificate ARN rewritten by scripts/set-grafana-cert.py).
+      #
+      # DO NOT REINTRODUCE Replace=true on this Application. Any chart that
+      # provisions a PVC is fundamentally incompatible with it. If a specific
+      # immutable object ever genuinely needs replacing, scope it to that one
+      # resource with the argocd.argoproj.io/sync-options: Replace=true
+      # annotation — never to the whole Application.
+      #
+      # Every other Application in this repo (root, shopfast, dashboards,
+      # argo-rollouts) already runs without Replace. This one was the outlier.
       - ServerSideApply=true
-      - Replace=true
     retry:
       limit: 5
       backoff:

@@ -133,6 +133,38 @@ if [ -f "${MONITORING}" ]; then
   fi
 fi
 
+# 7. NO APPLICATION-WIDE Replace=true.
+#    Replace=true makes Argo CD use `kubectl replace`: it posts the WHOLE object
+#    as the chart renders it and discards server-side field ownership. Any chart
+#    that provisions a PersistentVolumeClaim is then permanently unsyncable —
+#    the rendered PVC omits volumeName/storageClassName, the binding controller
+#    has written both, and the API server rejects the mutation:
+#
+#      PersistentVolumeClaim "vm-grafana" is invalid: spec: Forbidden:
+#      spec is immutable after creation except resources.requests ...
+#
+#    Observed 2026-09-07 on the `monitoring` Application: 5 retries, ~25 min,
+#    failed on every sync. Nothing was broken in the cluster, which is exactly
+#    what made it dangerous — the app simply stopped being able to deliver any
+#    future change (including the certificate ARN written by set-grafana-cert.py).
+#
+#    A genuinely immutable object that must be replaced is scoped with the
+#    per-resource annotation `argocd.argoproj.io/sync-options: Replace=true`,
+#    never with an Application-wide syncOption.
+#
+#    SELECTOR NOTE: this must match the VALUE, not the prose. monitoring.yaml
+#    documents this bug at length and names Replace=true many times in comments.
+#    So: strip comments first, then require the syncOptions LIST-ITEM form.
+for f in "${ROOT_APP}" "${CHILDREN_DIR}"/*.yaml; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f")"
+  if sed -E 's/#.*$//' "$f" | grep -qE '^[[:space:]]*-[[:space:]]*Replace=true[[:space:]]*$'; then
+    fail "${name}: sets Application-wide Replace=true — this breaks any chart with a PersistentVolumeClaim (spec is immutable once Bound). Use ServerSideApply, or scope Replace to one resource with the argocd.argoproj.io/sync-options annotation"
+  else
+    pass "${name}: no Application-wide Replace=true"
+  fi
+done
+
 echo
 if [ "${FAILURES}" -gt 0 ]; then
   printf '\033[1;31mGitOps manifest verification FAILED (%s problem(s)).\033[0m\n' "${FAILURES}"
