@@ -26,7 +26,7 @@ replicaCount: 3
 
 image:
   repository: 241533126054.dkr.ecr.us-east-1.amazonaws.com/shopfast-gitops-shopfast
-  tag: "5274b56"
+  tag: "fe97024"
   pullPolicy: IfNotPresent
 
 release:
