@@ -57,10 +57,26 @@ jobs:
       with:
         version: v3.16.2
     - name: "Helm chart lint \u2014 every strategy must render"
-      run: "set -e\nfor s in standard bluegreen canary; do\n  echo \"::group::helm\
-        \ lint strategy=$s\"\n  helm lint application/helm/shopfast \\\n    --set\
-        \ strategy=$s \\\n    --set image.repository=example.dkr.ecr.us-east-1.amazonaws.com/shopfast\
-        \ \\\n    --set image.tag=abc1234\n  echo \"::endgroup::\"\ndone\n"
+      run: "set -e\n# FIXTURES: _validate.tpl fails the render unless strategy,\n\
+        # image.repository, image.tag AND ingress.certificateArn are all\n# present.\
+        \ The chart's values.yaml deliberately ships certificateArn\n# empty (CI writes\
+        \ the real ARN, the Argo CD Application layers it on),\n# so a bare render\
+        \ can never succeed by design. The dummy ARN below has\n# the correct SHAPE\
+        \ and is not a credential.\n#\n# `helm lint` alone is NOT sufficient: it DOWNGRADES\
+        \ a template `fail`\n# to an informational line and still reports \"0 chart(s)\
+        \ failed\". That\n# is exactly how a missing fixture stayed invisible here\
+        \ while\n# verify-chart-exclusivity.sh (which uses `helm template`) died on\
+        \ it.\n# So this step now runs `helm template` too \u2014 that is the one\
+        \ that\n# actually proves the strategy renders.\nCERT_ARN=\"arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000\"\
+        \nfor s in standard bluegreen canary; do\n  echo \"::group::helm lint strategy=$s\"\
+        \n  helm lint application/helm/shopfast \\\n    --set strategy=$s \\\n   \
+        \ --set image.repository=example.dkr.ecr.us-east-1.amazonaws.com/shopfast\
+        \ \\\n    --set image.tag=abc1234 \\\n    --set \"ingress.certificateArn=${CERT_ARN}\"\
+        \n  echo \"::endgroup::\"\n  echo \"::group::helm template strategy=$s (lint\
+        \ downgrades fail; this does not)\"\n  helm template shopfast application/helm/shopfast\
+        \ \\\n    --set strategy=$s \\\n    --set image.repository=example.dkr.ecr.us-east-1.amazonaws.com/shopfast\
+        \ \\\n    --set image.tag=abc1234 \\\n    --set \"ingress.certificateArn=${CERT_ARN}\"\
+        \ >/dev/null\n  echo \"renders cleanly\"\n  echo \"::endgroup::\"\ndone\n"
     - name: Verify Blue/Green and Canary never render a Deployment
       run: bash scripts/verify-chart-exclusivity.sh
     - name: Verify the GitOps manifests are fully resolved

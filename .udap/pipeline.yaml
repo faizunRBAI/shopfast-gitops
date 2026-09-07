@@ -55,12 +55,35 @@ stages:
       - name: Helm chart lint — every strategy must render
         run: |
           set -e
+          # FIXTURES: _validate.tpl fails the render unless strategy,
+          # image.repository, image.tag AND ingress.certificateArn are all
+          # present. The chart's values.yaml deliberately ships certificateArn
+          # empty (CI writes the real ARN, the Argo CD Application layers it on),
+          # so a bare render can never succeed by design. The dummy ARN below has
+          # the correct SHAPE and is not a credential.
+          #
+          # `helm lint` alone is NOT sufficient: it DOWNGRADES a template `fail`
+          # to an informational line and still reports "0 chart(s) failed". That
+          # is exactly how a missing fixture stayed invisible here while
+          # verify-chart-exclusivity.sh (which uses `helm template`) died on it.
+          # So this step now runs `helm template` too — that is the one that
+          # actually proves the strategy renders.
+          CERT_ARN="arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
           for s in standard bluegreen canary; do
             echo "::group::helm lint strategy=$s"
             helm lint application/helm/shopfast \
               --set strategy=$s \
               --set image.repository=example.dkr.ecr.us-east-1.amazonaws.com/shopfast \
-              --set image.tag=abc1234
+              --set image.tag=abc1234 \
+              --set "ingress.certificateArn=${CERT_ARN}"
+            echo "::endgroup::"
+            echo "::group::helm template strategy=$s (lint downgrades fail; this does not)"
+            helm template shopfast application/helm/shopfast \
+              --set strategy=$s \
+              --set image.repository=example.dkr.ecr.us-east-1.amazonaws.com/shopfast \
+              --set image.tag=abc1234 \
+              --set "ingress.certificateArn=${CERT_ARN}" >/dev/null
+            echo "renders cleanly"
             echo "::endgroup::"
           done
       - name: Verify Blue/Green and Canary never render a Deployment
