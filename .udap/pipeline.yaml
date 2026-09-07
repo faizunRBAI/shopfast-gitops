@@ -67,6 +67,15 @@ stages:
         run: bash scripts/verify-chart-exclusivity.sh
       - name: Verify the GitOps manifests are fully resolved
         run: bash scripts/verify-gitops-manifests.sh
+      - name: Verify the gated rollback refuses unsafe targets
+        run: |
+          # A rollback path is only trustworthy if its REFUSALS work, and you
+          # find out they don't during an incident. This asserts, offline, that
+          # rollback-resolve.sh refuses 'latest', refuses the bootstrap seed,
+          # refuses a no-op, refuses to invent a target when there is no
+          # history — and that nothing on the rollback path patches the Argo CD
+          # Application spec (which selfHeal would fight forever).
+          bash scripts/verify-rollback.sh
       - name: Verify the ACM certificate covers every declared hostname
         env:
           PROJECT: ${{ secrets.PROJECT_NAME }}
@@ -336,6 +345,94 @@ stages:
           bash scripts/prune-retired-certs.sh "$PROJECT" "$CURRENT_CERT_ARN"
 
 pipelines:
+  - id: rollback
+    stages:
+      - id: gated_rollback
+        kind: custom
+        timeout_minutes: 30
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+        steps:
+          - name: Set up kubectl
+            uses: azure/setup-kubectl@v4
+            with:
+              version: v1.31.0
+          - name: Set up Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_version: "1.9.8"
+              terraform_wrapper: false
+          - name: Install the Argo Rollouts kubectl plugin
+            run: |
+              # Needed to ABORT an in-flight rollout so traffic returns to the
+              # stable version immediately, before the (slower, durable) git
+              # rewrite lands. Pinned to the controller line running in the
+              # cluster.
+              curl -sSL -o /tmp/kubectl-argo-rollouts \
+                https://github.com/argoproj/argo-rollouts/releases/download/v1.7.2/kubectl-argo-rollouts-linux-amd64
+              chmod +x /tmp/kubectl-argo-rollouts
+              sudo mv /tmp/kubectl-argo-rollouts /usr/local/bin/kubectl-argo-rollouts
+              kubectl argo rollouts version
+          - name: Fetch the deploy history
+            env:
+              BRANCH: ${{ github.ref_name }}
+            run: |
+              # The rendered checkout is SHALLOW (depth 1). rollback-resolve.sh
+              # walks the git history of the values file to find the previous
+              # deployed tag, and a shallow clone has none — it would report
+              # "no history" and refuse. Unshallow before resolving.
+              git fetch --unshallow --quiet || git fetch --depth=200 --quiet || true
+              git fetch origin "${BRANCH}" --quiet
+              git checkout "origin/${BRANCH}" -- gitops/applications/shopfast/values.yaml
+              echo "Deploy history available:"
+              git log --oneline -n 10 -- gitops/applications/shopfast/values.yaml
+          - name: Connect to the cluster
+            working-directory: infra
+            run: |
+              terraform init -input=false -reconfigure \
+                -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+                -backend-config="region=us-east-1"
+              aws eks update-kubeconfig --region us-east-1 \
+                --name "$(terraform output -raw eks_cluster_name)"
+          - name: Gated rollback
+            env:
+              APP_NAME: shopfast
+              APP_NAMESPACE: shopfast
+              ARGOCD_NAMESPACE: argocd
+              VALUES_FILE: gitops/applications/shopfast/values.yaml
+              ECR_REPOSITORY: ${{ secrets.PROJECT_NAME }}-shopfast
+              TARGET_TAG: ${{ vars.ROLLBACK_TARGET_TAG }}
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              BRANCH: ${{ github.ref_name }}
+            run: |
+              # GATED: this workflow only ever runs because a human dispatched
+              # it from the Actions tab. It is not a stage of the deploy and it
+              # never fires automatically off a green pipeline.
+              #
+              # DEFAULT (the common case): restore the PREVIOUS deployed version.
+              # Dispatch it with nothing else set and rollback-resolve.sh walks
+              # the values file's git history to find the last different tag.
+              #
+              # ROLLING BACK FURTHER: set the repository variable
+              # ROLLBACK_TARGET_TAG (Settings -> Secrets and variables ->
+              # Actions -> Variables) to an immutable Git SHA tag, dispatch,
+              # then CLEAR the variable again so the next rollback defaults to
+              # "previous" instead of silently reusing a stale pin.
+              #
+              # A repository variable rather than a workflow_dispatch input:
+              # this workflow is RENDERED from .udap/pipeline.yaml, whose schema
+              # has no way to declare dispatch inputs, and hand-editing the
+              # rendered file would be overwritten on the next render.
+              #
+              # Either way the target is validated before anything moves:
+              # 'latest', the bootstrap seed, a no-op, and any tag missing from
+              # ECR are all refused.
+              bash scripts/rollback.sh
+
   - id: state-fix
     stages:
       - id: drop_certificate_from_state

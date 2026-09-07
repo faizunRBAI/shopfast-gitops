@@ -65,6 +65,13 @@ jobs:
       run: bash scripts/verify-chart-exclusivity.sh
     - name: Verify the GitOps manifests are fully resolved
       run: bash scripts/verify-gitops-manifests.sh
+    - name: Verify the gated rollback refuses unsafe targets
+      run: "# A rollback path is only trustworthy if its REFUSALS work, and you\n\
+        # find out they don't during an incident. This asserts, offline, that\n# rollback-resolve.sh\
+        \ refuses 'latest', refuses the bootstrap seed,\n# refuses a no-op, refuses\
+        \ to invent a target when there is no\n# history \u2014 and that nothing on\
+        \ the rollback path patches the Argo CD\n# Application spec (which selfHeal\
+        \ would fight forever).\nbash scripts/verify-rollback.sh\n"
     - name: Verify the ACM certificate covers every declared hostname
       run: '# Catches a certificate that does not name every declared hostname,
 
