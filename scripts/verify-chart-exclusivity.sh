@@ -7,12 +7,20 @@
 # This is a TEST, not a lint. It renders the chart under each strategy and
 # asserts on the object kinds actually produced. If someone later edits the
 # template guards incorrectly, this fails the pipeline before anything ships.
+#
+# It also asserts the Rollouts ownership annotation on the Services (see the
+# "managed-by-rollouts" checks below): that annotation is what stops Argo CD
+# and Argo Rollouts fighting over the same field forever.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
 CHART="application/helm/shopfast"
 IMG_REPO="example.dkr.ecr.us-east-1.amazonaws.com/shopfast"
 IMG_TAG="abc1234"
+
+# Argo Rollouts stamps this on every Service it manages. The chart must declare
+# it verbatim, or Argo CD self-heals it away and Rollouts re-adds it endlessly.
+ROLLOUTS_ANN="argo-rollouts.argoproj.io/managed-by-rollouts: shopfast"
 
 FAILED=0
 
@@ -28,6 +36,11 @@ render() {
 
 count_kind() {
   grep -cE "^kind: $1$" <<<"$2" || true
+}
+
+# Fixed-string occurrence count, for asserting on rendered field values.
+count_matches() {
+  grep -cF "$1" <<<"$2" || true
 }
 
 expect_count() {
@@ -54,6 +67,10 @@ OUT="$(render standard)" || { echo "render failed" >&2; exit 1; }
 expect_count "Deployment rendered"     "$(count_kind Deployment "$OUT")"       1
 expect_count "Rollout NOT rendered"    "$(count_kind Rollout "$OUT")"          0
 expect_count "AnalysisTemplate absent" "$(count_kind AnalysisTemplate "$OUT")" 0
+expect_count "Service rendered"        "$(count_kind Service "$OUT")"          1
+# No Rollout exists under this strategy, so nothing stamps the Service and
+# claiming Rollouts ownership would be false.
+expect_count "Rollouts annotation absent" "$(count_matches "${ROLLOUTS_ANN}" "$OUT")" 0
 
 # --- bluegreen --------------------------------------------------------------
 echo "==> strategy=bluegreen"
@@ -62,6 +79,11 @@ expect_count    "Deployment NOT rendered" "$(count_kind Deployment "$OUT")" 0
 expect_count    "Rollout rendered"        "$(count_kind Rollout "$OUT")"    1
 expect_contains "blueGreen strategy block present" "$OUT" "blueGreen:"
 expect_contains "previewService configured"        "$OUT" "previewService:"
+expect_count    "active + preview Services rendered" "$(count_kind Service "$OUT")" 2
+# Both Services carry it, and the value is the ROLLOUT name on both -- the
+# preview Service is shopfast-preview but the annotation still reads shopfast.
+expect_count    "Rollouts annotation on both Services" \
+                "$(count_matches "${ROLLOUTS_ANN}" "$OUT")" 2
 
 # --- canary -----------------------------------------------------------------
 echo "==> strategy=canary"
@@ -70,6 +92,9 @@ expect_count    "Deployment NOT rendered" "$(count_kind Deployment "$OUT")" 0
 expect_count    "Rollout rendered"        "$(count_kind Rollout "$OUT")"    1
 expect_contains "canary strategy block present" "$OUT" "canary:"
 expect_contains "weighted canary steps present" "$OUT" "setWeight:"
+expect_count    "active + preview Services rendered" "$(count_kind Service "$OUT")" 2
+expect_count    "Rollouts annotation on both Services" \
+                "$(count_matches "${ROLLOUTS_ANN}" "$OUT")" 2
 
 # --- guards -----------------------------------------------------------------
 echo "==> guard: mutable tag must be refused"

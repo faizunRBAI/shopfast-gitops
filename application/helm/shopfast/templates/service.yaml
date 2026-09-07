@@ -6,6 +6,24 @@ metadata:
   name: {{ include "shopfast.fullname" . }}
   labels:
     {{- include "shopfast.labels" . | nindent 4 }}
+{{- if or (eq .Values.strategy "bluegreen") (eq .Values.strategy "canary") }}
+  annotations:
+    {{/*
+    Argo Rollouts stamps this annotation onto every Service it manages, naming
+    the ROLLOUT that owns it -- so the value is fullname on BOTH Services, even
+    though the preview Service is called <fullname>-preview.
+
+    Declared here so git and the cluster agree. Without it Argo CD sees an
+    annotation git does not have, self-heals it away, and Rollouts immediately
+    re-stamps it: an endless drift loop (observed at autoHealAttemptsCount 102,
+    always these two Services). Two writers on one field; declaring it makes the
+    desired state match what the owning controller writes.
+
+    Guarded by the strategy: with strategy=standard there is no Rollout, nothing
+    stamps the Service, and claiming otherwise would be false.
+    */}}
+    argo-rollouts.argoproj.io/managed-by-rollouts: {{ include "shopfast.fullname" . }}
+{{- end }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -33,6 +51,9 @@ metadata:
   labels:
     {{- include "shopfast.labels" . | nindent 4 }}
     shopfast.xyz/role: preview
+  annotations:
+    {{/* Same Rollouts-owned annotation; see the active Service above. */}}
+    argo-rollouts.argoproj.io/managed-by-rollouts: {{ include "shopfast.fullname" . }}
 spec:
   type: {{ .Values.service.type }}
   ports:
