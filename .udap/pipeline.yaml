@@ -71,10 +71,12 @@ stages:
         env:
           PROJECT: ${{ secrets.PROJECT_NAME }}
         run: |
-          # infra/dns.tf ignores SAN changes on an existing certificate (that is
-          # what broke the destroy-deadlock), so a new hostname would otherwise
-          # go green in CI while serving a mismatched certificate. This catches
-          # that divergence read-only, before any AWS resource is touched.
+          # Catches a certificate that does not name every declared hostname,
+          # read-only, before any AWS resource is touched. This guard used to
+          # compensate for infra/dns.tf ignoring SAN changes on an existing
+          # certificate; that ignore_changes was REMOVED on 2026-09-07 (it had
+          # frozen the SAN list permanently), so rotation is now ordinary and
+          # this check is a genuine backstop rather than a workaround.
           bash scripts/verify-cert-sans.sh "$PROJECT"
       - name: Dependency vulnerability scanning runs out-of-band
         run: |
@@ -131,23 +133,6 @@ stages:
       - name: Terraform validate
         working-directory: infra
         run: terraform validate
-      - name: ONE-SHOT REPAIR — drop the stranded deposed ACM certificate object
-        working-directory: infra
-        run: |
-          # TEMPORARY. Remove this step and scripts/drop-deposed-cert.sh once it
-          # has reported "nothing to repair" on a run.
-          #
-          # The 2026-09-06 apply was cancelled mid-destroy of the superseded
-          # certificate (ACM blocks deleting a cert attached to the ALB listener,
-          # and the listener only moves in the configure stage). That left the old
-          # object DEPOSED in state. No lifecycle rule suppresses a deposed
-          # object, so terraform retries the impossible delete on every apply and
-          # provision can never reach configure — a closed loop.
-          #
-          # `state rm` makes terraform FORGET the object; it deletes nothing in
-          # AWS. The certificate keeps serving traffic and is retired later by
-          # verify's prune step, which only deletes detached certificates.
-          bash ../scripts/drop-deposed-cert.sh
       - name: Terraform apply
         working-directory: infra
         run: terraform apply -input=false -auto-approve
@@ -351,6 +336,59 @@ stages:
           bash scripts/prune-retired-certs.sh "$PROJECT" "$CURRENT_CERT_ARN"
 
 pipelines:
+  - id: state-fix
+    stages:
+      - id: drop_certificate_from_state
+        kind: custom
+        timeout_minutes: 15
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+          TF_VAR_region: us-east-1
+          TF_VAR_base_domain: royalbengal.xyz
+          TF_VAR_argocd_hostname: argocd.shopfast.royalbengal.xyz
+          TF_VAR_app_hostname: shopfast.royalbengal.xyz
+          TF_VAR_grafana_hostname: grafana.shopfast.royalbengal.xyz
+        steps:
+          - name: Set up Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_version: "1.9.8"
+              terraform_wrapper: false
+          - name: Terraform init
+            working-directory: infra
+            run: |
+              terraform init -input=false -reconfigure \
+                -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+                -backend-config="region=us-east-1"
+          - name: Drop the platform certificate from terraform state
+            run: |
+              # ONE-SHOT MANUAL REPAIR — dispatch-only, NEVER in the deploy path.
+              #
+              # Removes the STATE ENTRY aws_acm_certificate.platform. Nothing is
+              # deleted in AWS: both certificates stay in ACM and the ALB keeps
+              # serving traffic while this runs.
+              #
+              # WHY: infra/dns.tf carried ignore_changes on the SAN list, so the
+              # SAN list was read at CREATE time only and terraform would never
+              # replace the certificate. State was pinned to the OLD 2-SAN cert
+              # (argocd + apex, no grafana) permanently. That ignore_changes is
+              # removed in this same commit; dropping the resource from state is
+              # what lets the next apply CREATE a 3-SAN certificate.
+              #
+              # The address is LITERAL and the script does no discovery. Two
+              # earlier repair scripts tried to FIND their target with
+              # `terraform state list` / `show -json` and got it wrong — state
+              # list cannot see deposed objects at all. Removing the address
+              # takes the current object AND the deposed 19b0aa2c leftover.
+              #
+              # Idempotent: a second run finds nothing and exits 0.
+              bash scripts/state-drop-certificate.sh
+
   - id: security-deps
     stages:
       - id: dependency_scan

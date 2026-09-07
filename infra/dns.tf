@@ -56,13 +56,47 @@
 # this resource's lifecycle so the apply completes, the listeners flip in
 # configure, and the now-unreferenced certificate is deleted out-of-band.
 #
-# HOW THE RETIRED CERTIFICATE IS CLEANED UP: it is no longer in terraform state
-# after the replacement (see the moved/removed note below) — it is deleted by
+# HOW THE RETIRED CERTIFICATE IS CLEANED UP: it is deleted by
 # scripts/prune-retired-certs.sh, which runs in the VERIFY stage, only deletes
 # certificates that (a) carry Project=<project> tags, (b) are not the current
 # acm_certificate_arn, and (c) have an EMPTY InUseBy list. Condition (c) is the
 # whole safety property: a certificate still attached to a listener is skipped,
 # never forced. Nothing is deleted while it is serving traffic.
+#
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO `ignore_changes` HERE (VERIFIED 2026-09-07 — do not re-add)
+# ---------------------------------------------------------------------------
+# This resource previously carried `ignore_changes = [subject_alternative_names]`
+# as a second deadlock breaker. REMOVED, because it did not break the deadlock
+# so much as make the deadlock unreachable by freezing the certificate forever:
+#
+#   ignore_changes means the SAN list is read at CREATE time ONLY. An existing
+#   certificate is therefore NEVER replaced by this resource, no matter how the
+#   SAN list changes in this file.
+#
+# The measured consequence: state held the OLD 2-SAN certificate (a305f33d:
+# argocd + apex, NO grafana) permanently. Every deploy read that ARN from
+# state, the build_push GitOps commit wrote it into all three ingress
+# annotations, and grafana.shopfast served a certificate that does not name it.
+# A stable fixed point that reported success on every run while doing the wrong
+# thing — the worst failure mode available, and it survived eight runs.
+#
+# The deadlock is already handled properly, and in one place only: the retired
+# certificate is pruned OUT of band by the verify stage. That is sufficient on
+# its own. Adding ignore_changes on top bought nothing and cost the ability to
+# ever change a hostname.
+#
+# ROTATION IS NOW ORDINARY: edit the SAN list, apply, and create_before_destroy
+# creates the replacement while the old certificate keeps serving traffic;
+# verify prunes the old one after configure moves the listeners. The new
+# certificate starts PENDING_VALIDATION, so the cPanel CNAMEs printed by
+# provision must be added before HTTPS works on the new name.
+#
+# IF AN APPLY EVER HANGS ON A CERTIFICATE DESTROY AGAIN: that means an in-apply
+# destroy came back. Do not extend timeout_minutes — it only fails later. Drop
+# the resource from state (Actions -> state-fix -> Run workflow, which runs
+# scripts/state-drop-certificate.sh) so the next apply only CREATES, and let
+# the verify stage prune the retired certificate once the listeners have moved.
 # ---------------------------------------------------------------------------
 
 resource "aws_route53_zone" "main" {
@@ -88,24 +122,11 @@ resource "aws_acm_certificate" "platform" {
 
   lifecycle {
     # Zero-downtime swap: the replacement certificate is created and available
-    # before anything stops referencing the old one.
+    # before anything stops referencing the old one. This is what kept the site
+    # up through the 2026-09-06 failed run, and it is the ONLY lifecycle rule
+    # this resource needs — see the block comment above on why ignore_changes
+    # was removed rather than tuned.
     create_before_destroy = true
-
-    # DEADLOCK BREAKER (see the block comment above). Replacing this resource
-    # would otherwise queue an in-apply delete of the old certificate, which
-    # ACM blocks for as long as the ALB listener still references it — and that
-    # listener is only moved by the configure stage, after provision returns.
-    # Ignoring the SAN set here means an existing certificate is never REPLACED
-    # by this resource: the SAN list is read at CREATE time only.
-    #
-    # Consequence, stated so the next SAN change is not a surprise: to add or
-    # remove a name you must let this resource be created fresh, i.e. untaint
-    # the old one out of state first:
-    #     terraform state rm aws_acm_certificate.platform
-    #     terraform apply      # creates the new cert with the new SAN list
-    # The retired certificate is then deleted by the verify stage's
-    # prune-retired-certs.sh once the listeners have moved off it.
-    ignore_changes = [subject_alternative_names]
   }
 }
 
