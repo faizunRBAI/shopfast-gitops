@@ -127,6 +127,23 @@ stages:
       - name: Terraform validate
         working-directory: infra
         run: terraform validate
+      - name: ONE-SHOT REPAIR — drop the stranded deposed ACM certificate object
+        working-directory: infra
+        run: |
+          # TEMPORARY. Remove this step and scripts/drop-deposed-cert.sh once it
+          # has reported "nothing to repair" on a run.
+          #
+          # The 2026-09-06 apply was cancelled mid-destroy of the superseded
+          # certificate (ACM blocks deleting a cert attached to the ALB listener,
+          # and the listener only moves in the configure stage). That left the old
+          # object DEPOSED in state. No lifecycle rule suppresses a deposed
+          # object, so terraform retries the impossible delete on every apply and
+          # provision can never reach configure — a closed loop.
+          #
+          # `state rm` makes terraform FORGET the object; it deletes nothing in
+          # AWS. The certificate keeps serving traffic and is retired later by
+          # verify's prune step, which only deletes detached certificates.
+          bash ../scripts/drop-deposed-cert.sh
       - name: Terraform apply
         working-directory: infra
         run: terraform apply -input=false -auto-approve
