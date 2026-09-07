@@ -5,8 +5,20 @@
 # metrics on a container port with no Service in front, so a scrape alone would
 # select no endpoints and silently collect nothing.
 #
-# Port 8090 and the selector were READ off the live pod:
-#   app.kubernetes.io/name=argo-rollouts, container port "metrics" 8090
+# THE SELECTOR NEEDS BOTH LABELS — name IS NOT ENOUGH.
+#   The controller AND the dashboard both carry
+#     app.kubernetes.io/name: argo-rollouts
+#   and are told apart only by component:
+#     controller -> app.kubernetes.io/component: rollouts-controller
+#     dashboard  -> app.kubernetes.io/component: rollouts-dashboard
+#
+#   Selecting on name alone matched BOTH pods (verified live: the Service came
+#   up with two endpoints while the controller has a single replica). The
+#   dashboard serves the UI on 3100 and nothing on 8090, so that second
+#   endpoint is a permanently failing scrape target — which shows up as gaps
+#   and target-down noise attributed to the controller, not as a clean error.
+#
+# Port 8090 and both labels were READ off the live pods, not assumed.
 #
 # These are the signals that tell you a rollout is progressing, paused awaiting
 # promotion, or aborted — the blue/green story this project is built around.
@@ -28,6 +40,8 @@ spec:
       protocol: TCP
   selector:
     app.kubernetes.io/name: argo-rollouts
+    # Excludes the dashboard pod, which shares the name label.
+    app.kubernetes.io/component: rollouts-controller
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMServiceScrape

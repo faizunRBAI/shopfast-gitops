@@ -8,11 +8,26 @@
 #       app.kubernetes.io/version: 1.0.0     while pods run :5274b56
 #   This job copies the real tag off the running container onto the label.
 #
-# IMAGE CHOICE
-#   bitnami/kubectl: it ships a shell AND kubectl. A distroless kubectl image
-#   cannot run this script at all — there is no /bin/sh to interpret it.
-#   Pinned to an explicit version tag, never "latest": a floating tag makes the
-#   behaviour of this job change underneath you without a commit.
+# IMAGE CHOICE — AND WHY IT IS A DIGEST
+#   bitnami/kubectl ships a shell AND kubectl. A distroless kubectl image
+#   cannot run this script at all: there is no /bin/sh to interpret it.
+#
+#   It is pinned BY DIGEST because Bitnami no longer publishes versioned tags
+#   on the free Docker Hub tier. Verified against this cluster's own runtime:
+#       bitnami/kubectl:1.31.3 -> NotFound
+#       bitnami/kubectl:1.37.0 -> NotFound
+#       bitnami/kubectl:latest -> pulls, reports Client Version v1.37.0
+#   So `latest` is the ONLY tag that resolves — and depending on a floating
+#   tag for a job that runs 1440 times a day is how this breaks silently later.
+#
+#   THE DIGEST BELOW WAS READ FROM AN ACTUAL SUCCESSFUL PULL in this cluster
+#   (.status.containerStatuses[0].imageID of a probe pod), never written from
+#   memory. A fabricated sha256 is ImagePullBackOff forever and looks MORE
+#   rigorous than a tag, so it attracts less review.
+#
+#   TO REFRESH IT: pull bitnami/kubectl:latest and read back the imageID.
+#   imagePullPolicy is IfNotPresent because a digest is already immutable —
+#   Always would re-hit the registry every minute for no benefit.
 # ---------------------------------------------------------------------------
 apiVersion: batch/v1
 kind: CronJob
@@ -28,7 +43,6 @@ spec:
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
-  # A run that has not completed in 2 minutes is stuck; kill it.
   startingDeadlineSeconds: 60
   jobTemplate:
     spec:
@@ -50,11 +64,8 @@ spec:
               type: RuntimeDefault
           containers:
             - name: label-sync
-              image: docker.io/bitnami/kubectl:1.31.3
-              # The tag is mutable upstream, so always re-resolve it. (A digest
-              # pin would be stronger, but it must be READ from the registry —
-              # a digest written from memory is ImagePullBackOff forever.)
-              imagePullPolicy: Always
+              image: docker.io/bitnami/kubectl@sha256:b29d8c1665b70817259ceecaea16ab27aab6368b48daf485d19436c809067492
+              imagePullPolicy: IfNotPresent
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
@@ -91,9 +102,8 @@ spec:
                   IMAGE=$(kubectl -n "$NS" get "$KIND" "$NAME" \
                     -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-                  # Strip everything before the last colon to get the tag. Guard
-                  # against a digest-pinned image (repo@sha256:...), which has
-                  # no tag to publish.
+                  # Guard against a digest-pinned app image (repo@sha256:...),
+                  # which has no tag to publish.
                   case "$IMAGE" in
                     *@sha256:*)
                       echo "image is digest-pinned ($IMAGE); no tag to sync"
