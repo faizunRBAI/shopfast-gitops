@@ -38,7 +38,7 @@ stages:
   - id: security
     kind: security
     needs: [test]
-    timeout_minutes: 45
+    timeout_minutes: 20
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -76,40 +76,29 @@ stages:
           # go green in CI while serving a mismatched certificate. This catches
           # that divergence read-only, before any AWS resource is touched.
           bash scripts/verify-cert-sans.sh "$PROJECT"
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-      - name: Restore the NVD vulnerability database
-        uses: actions/cache@v4
-        with:
-          # Downloading the full NVD feed is ~387,000 records. It took ~4min on
-          # 2026-09-06 and had reached only 26% after 30min on 2026-09-07, which
-          # cancelled this stage at its timeout. Feed throughput is not ours to
-          # control, so we stop re-downloading it: dependency-check restores this
-          # directory and fetches only the delta since the cached snapshot.
-          # The date suffix rolls the cache daily; restore-keys means a run always
-          # starts from yesterday's database rather than from empty.
-          path: ~/.dependency-check-data
-          key: nvd-db-${{ github.run_id }}
-          restore-keys: |
-            nvd-db-
-      - name: OWASP dependency vulnerability scan (reporting mode)
-        timeout-minutes: 25
-        env:
-          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-        run: bash scripts/dependency-scan.sh
-      - name: Upload dependency-check report
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-check-report
-          path: |
-            application/target/dependency-check-report.html
-            application/target/dependency-check-report.json
-          retention-days: 30
-          if-no-files-found: warn
+      - name: Dependency vulnerability scanning runs out-of-band
+        run: |
+          # MOVED OUT OF THE DEPLOY PATH — 2026-09-07, owner decision.
+          #
+          # OWASP dependency-check must download the ENTIRE ~387,000-record NVD
+          # corpus before it can inspect a single JAR; there is no partial mode.
+          # That made every deployment gated on nvd.nist.gov's throughput:
+          #   2026-09-06  ~97,000 rec/min  -> completed in 4m46s, stage PASSED
+          #   2026-09-07  ~2,600 rec/min   -> 26% at the cap, stage cancelled
+          #   2026-09-07  ~15,000 rec/min  -> NVD aborted the fetch itself
+          #                                   (RejectedExecutionException)
+          # Caching cannot rescue this: actions/cache only writes its entry when
+          # the step succeeds, so a download that never finishes never seeds the
+          # cache, and the next run starts cold again.
+          #
+          # NOTHING IS DISABLED. The same scripts/dependency-scan.sh, the same
+          # pom.xml threshold and the same report artifacts now run in the
+          # security-deps workflow (.github/workflows/security-deps.yml), which
+          # also seeds the shared NVD cache that this deploy path no longer
+          # needs. A bad NVD day now delays a REPORT instead of a DEPLOYMENT.
+          echo "Dependency vulnerability scan: security-deps workflow (out-of-band)."
+          echo "Report: Actions -> security-deps -> dependency-check-report artifact."
+          echo "Threshold unchanged: application/pom.xml security.failBuildOnCVSS."
 
   - id: provision
     kind: provision
@@ -360,6 +349,46 @@ stages:
           # is EMPTY — anything still attached is skipped, never forced. This is
           # what replaces the in-apply destroy that deadlocked provision.
           bash scripts/prune-retired-certs.sh "$PROJECT" "$CURRENT_CERT_ARN"
+
+pipelines:
+  - id: security-deps
+    stages:
+      - id: dependency_scan
+        kind: security
+        timeout_minutes: 180
+        steps:
+          - name: Set up JDK 21
+            uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: "21"
+              cache: maven
+          - name: Restore the NVD vulnerability database
+            uses: actions/cache@v4
+            with:
+              # This workflow is the ONLY writer of this cache, and it is the
+              # reason the scan lives here rather than in the deploy path: the
+              # full NVD corpus is ~387,000 records and actions/cache only saves
+              # its entry when the job SUCCEEDS. With a 3-hour budget the
+              # download can finish even on a degraded feed and finally seed the
+              # cache; later runs then fetch only the delta.
+              path: ~/.dependency-check-data
+              key: nvd-db-${{ github.run_id }}
+              restore-keys: |
+                nvd-db-
+          - name: OWASP dependency vulnerability scan (reporting mode)
+            env:
+              NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+            run: bash scripts/dependency-scan.sh
+          - name: Upload dependency-check report
+            uses: actions/upload-artifact@v4
+            with:
+              name: dependency-check-report
+              path: |
+                application/target/dependency-check-report.html
+                application/target/dependency-check-report.json
+              retention-days: 30
+              if-no-files-found: warn
 
 rollback:
   strategy: manual

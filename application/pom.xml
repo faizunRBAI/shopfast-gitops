@@ -43,15 +43,20 @@
 
           dependency-check defaults this to ~/.m2/repository/org/owasp/
           dependency-check-data/<n>/, which the maven cache key (keyed on
-          pom.xml) does not reliably preserve. Downloading the full NVD feed is
-          ~387,000 records: it completed in about four minutes on 2026-09-06 and
-          had reached only 26% after THIRTY minutes on 2026-09-07, which
-          cancelled the security stage at its timeout. The feed's throughput is
-          not ours to control, so the durable fix is to stop re-downloading it.
+          pom.xml) does not reliably preserve.
 
-          With this path pinned, the security stage restores the directory from
-          the Actions cache and dependency-check fetches only the delta since
-          the cached snapshot.
+          Downloading the full NVD feed is ~387,000 records, and there is no
+          partial mode: the whole corpus must land before a single jar can be
+          inspected. Measured throughput on consecutive days ranged from ~97,000
+          records/min (4m46s total) to ~2,600 records/min (~2.5h projected), and
+          one run was aborted by NVD itself mid-fetch. Because that rate is not
+          ours to control, the scan was moved OUT of the deploy pipeline into
+          the `security-deps` workflow, which has a 3-hour budget and is the
+          only writer of the shared nvd-db-* Actions cache.
+
+          With this path pinned, that workflow restores the directory and
+          dependency-check fetches only the delta since the cached snapshot.
+          See docs/DEPENDENCY-SCANNING.md.
         -->
         <nvd.data.directory>${user.home}/.dependency-check-data</nvd.data.directory>
 
@@ -62,9 +67,10 @@
           ====================================================================
 
           CVSS 11 is above the maximum possible score (10.0), so no finding can
-          fail the build. The scan STILL RUNS on every pipeline execution and
-          still publishes its full HTML report — findings remain visible, they
-          simply no longer block delivery.
+          fail the build. The scan STILL RUNS (in the `security-deps` workflow —
+          see the nvd.data.directory note above) and still publishes its full
+          HTML report — findings remain visible, they simply no longer block
+          delivery.
 
           WHY: Spring Boot 3.5.16 — the newest release of this line — ships
           transitive dependencies with unpatched criticals in the HTTP stack:
@@ -131,8 +137,9 @@
             </plugin>
 
             <!--
-              Pinned here so the CI security stage and any local run use the same
-              analyzer version and settings. Invoked by scripts/dependency-scan.sh.
+              Pinned here so the security-deps workflow and any local run use the
+              same analyzer version and settings. Invoked by
+              scripts/dependency-scan.sh.
             -->
             <plugin>
                 <groupId>org.owasp</groupId>

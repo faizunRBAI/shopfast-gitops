@@ -2,15 +2,21 @@
 # ---------------------------------------------------------------------------
 # OWASP dependency-check for the ShopFast application.
 #
+# WHERE THIS RUNS: the `security-deps` workflow (.github/workflows/
+# security-deps.yml), triggered on demand — NOT in the deploy pipeline.
+# dependency-check must download the entire ~387,000-record NVD corpus before it
+# can inspect a single jar, which made every deployment gated on nvd.nist.gov's
+# throughput. See docs/DEPENDENCY-SCANNING.md for the measurements and README
+# section 9.2 for the decision. The scan itself is UNCHANGED by that move.
+#
 # REPORTING MODE (accepted risk — decision recorded 2026-09-06).
 # The threshold lives in application/pom.xml as security.failBuildOnCVSS and is
 # currently 11, i.e. above the maximum CVSS score, so findings do not fail the
-# build. The scan still runs on every pipeline execution and still produces its
-# full report.
+# build. The scan still produces its full report.
 #
 # Reporting mode is only worth anything if somebody SEES the findings, so this
 # script prints a critical/high summary to the job log after the scan and the
-# pipeline uploads the HTML + JSON reports as build artifacts.
+# workflow uploads the HTML + JSON reports as build artifacts.
 #
 # The NVD credential is consumed straight from the environment. It is never
 # printed, written to a file, or echoed into the log.
@@ -31,6 +37,10 @@ else
 fi
 
 echo "Running OWASP dependency-check…"
+echo "NOTE: on a cold cache this downloads the full NVD feed (~387k records)."
+echo "Feed throughput has been measured between ~2,600 and ~97,000 records/min,"
+echo "so a first run can take from minutes to hours. Subsequent runs restore the"
+echo "cached database and fetch only the delta. See docs/DEPENDENCY-SCANNING.md."
 mvn "${MVN_ARGS[@]}"
 
 # --- Surface the findings ---------------------------------------------------

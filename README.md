@@ -63,10 +63,15 @@ cluster — so there is no drift war between two writers.
 │   └── monitoring/dashboards/      Grafana dashboards as ConfigMaps
 ├── scripts/
 │   ├── verify-chart-exclusivity.sh Proves Blue/Green & Canary never render a Deployment
+│   ├── verify-gitops-manifests.sh  Proves no placeholder survives into git
+│   ├── verify-cert-sans.sh         Proves the ACM cert covers every hostname
+│   ├── prune-retired-certs.sh      Retires superseded (detached) ACM certs
 │   ├── dependency-scan.sh          OWASP scan + findings summary
+│   ├── scan-image.sh               Trivy container image scan
 │   └── set-image.py                The GitOps image-tag bump
 ├── docs/
 │   ├── DNS-CPANEL.md               ← domain setup (read this)
+│   ├── DEPENDENCY-SCANNING.md      why the OWASP scan runs out-of-band
 │   └── ROLLOUTS.md                 promotion / rollback runbook
 └── .udap/pipeline.yaml             CI spec (workflows are rendered from it)
 ```
@@ -85,7 +90,7 @@ cluster — so there is no drift war between two writers.
 | ECR | `<project>-shopfast`, immutable tags, scan-on-push, keep last 30 |
 | IAM | Cluster role, node role, EBS CSI (IRSA), ALB controller (IRSA) |
 | Route 53 | Public hosted zone for `royalbengal.xyz` |
-| ACM | Cert for `argocd.shopfast.…` + `shopfast.…` |
+| ACM | Cert for `argocd.shopfast.…` + `shopfast.…` + `grafana.shopfast.…` |
 | S3 | Remote Terraform state (platform-managed bucket) |
 
 ---
@@ -104,17 +109,20 @@ cluster — so there is no drift war between two writers.
 
 ## 5. GitHub Actions design
 
-One workflow, rendered from `.udap/pipeline.yaml`:
+The deploy workflow is rendered from `.udap/pipeline.yaml`:
 
 | Stage | Does |
 |---|---|
 | `lint` | `mvn compile` |
 | `test` | `mvn test` — asserts `/api/hello`, `/actuator/health`, `/actuator/prometheus` |
-| `security` | `helm lint` on **all three strategies** + chart-exclusivity test + OWASP dependency-check |
+| `security` | `helm lint` on **all three strategies** + chart-exclusivity test + GitOps manifest resolution + ACM SAN coverage |
 | `provision` | `terraform init/validate/apply`; prints Route 53 nameservers |
 | `build_push` | Build jar → Docker → **ECR with `${GITHUB_SHA::7}`** → Trivy scan → commit new tag into `gitops/` |
 | `configure` | ALB controller → Argo CD (HTTPS ingress) → App-of-Apps handover |
-| `verify` | Real AWS/EKS/Argo state checks (see §8) |
+| `verify` | Real AWS/EKS/Argo state checks (see §8) + retire superseded ACM certs |
+
+A second workflow, **`security-deps`**, runs OWASP dependency-check on demand —
+see §9 and [`docs/DEPENDENCY-SCANNING.md`](docs/DEPENDENCY-SCANNING.md).
 
 Every stage that runs `terraform` re-runs `init` with identical backend flags and
 reads outputs itself — no infrastructure values are threaded between jobs
@@ -138,8 +146,7 @@ Set for this project:
 | Secret | Purpose |
 |---|---|
 | `ARGOCD_ADMIN_PASSWORD` | Argo CD `admin` password — bcrypt-hashed at install time, **never committed** |
-| `GITOPS_REPO_URL` | HTTPS URL of this repo, injected into Applications |
-| `NVD_API_KEY` | *(optional)* authenticated NVD feed for dependency-check |
+| `NVD_API_KEY` | *(optional)* authenticated NVD feed for the `security-deps` workflow |
 
 No credential is ever written to a file, a manifest, or a log.
 
@@ -160,8 +167,8 @@ No credential is ever written to a file, a manifest, or a log.
 ## 8. Deployment flow
 
 ```
-commit → lint → test → security scan → terraform apply
-       → docker build → ECR (tag = git SHA, immutable)
+commit → lint → test → security checks → terraform apply
+       → docker build → ECR (tag = git SHA, immutable) → Trivy scan
        → CI commits that tag into gitops/applications/shopfast/values.yaml
        → Argo CD detects drift and syncs
        → Argo Rollouts executes blue/green or canary
@@ -182,24 +189,24 @@ See [`docs/ROLLOUTS.md`](docs/ROLLOUTS.md) for promotion and rollback.
 
 - **No OIDC** (explicit requirement). AWS access via encrypted GitHub Secrets only.
 - **No secrets in git.** The Argo CD password is hashed in-memory at install;
-  Grafana's is generated in-cluster. Manifests carry placeholders, never values.
+  Grafana's is set out-of-band. Manifests carry placeholders, never values.
 - **IRSA** for in-cluster AWS access (ALB controller, EBS CSI) — no node-wide creds.
 - **Private nodes.** Workloads have no public IPs; egress via NAT.
 - **Least-privilege pods**: non-root (UID 10001), `readOnlyRootFilesystem`,
   all capabilities dropped, `RuntimeDefault` seccomp, no auto-mounted SA token.
 - **Immutable images** at the registry level; `latest` is refused by the chart.
-- **Supply chain**: OWASP dependency-check + Trivy image scan + ECR scan-on-push.
+- **Supply chain**: OWASP dependency-check (out-of-band, §9.2) + Trivy image scan
+  in `build_push` + ECR scan-on-push.
 - **Argo CD RBAC** defaults to `role:readonly`; TLS terminated at the ALB with ACM.
 
-### ⚠️ Accepted risk — dependency scanning runs in REPORTING mode
+### 9.1 ⚠️ Accepted risk — dependency scanning runs in REPORTING mode
 
 **Decision: project owner, 2026-09-06.**
 
 `security.failBuildOnCVSS` in `application/pom.xml` is set to **11** — above the
 maximum CVSS score — so dependency findings **do not fail the build**. The scan
-still runs on every pipeline execution and uploads its full HTML + JSON report as
-a build artifact; the job log prints a HIGH/CRITICAL summary and a warning
-annotation.
+still uploads its full HTML + JSON report as an artifact; the job log prints a
+HIGH/CRITICAL summary and a warning annotation.
 
 **Why:** Spring Boot 3.5.16 (the newest release of its line) ships transitive
 dependencies with unpatched criticals in the HTTP stack:
@@ -226,6 +233,24 @@ Genuine *false positives* are handled separately and narrowly in
 [`application/owasp-suppressions.xml`](application/owasp-suppressions.xml), which
 documents the four conditions a suppression must satisfy.
 
+### 9.2 Dependency scanning runs out-of-band
+
+**Decision: project owner, 2026-09-07.**
+
+The OWASP scan runs in its own **`security-deps`** workflow rather than in the
+deploy pipeline. dependency-check must download the entire ~387,000-record NVD
+corpus before it can inspect a single JAR, which made every deployment gated on
+`nvd.nist.gov` throughput — measured between ~2,600 and ~97,000 records/minute on
+consecutive days, with one run aborted by NVD itself.
+
+**Nothing was disabled or weakened**: same script, same threshold, same report.
+The change is that a third-party feed outage now delays a *report* instead of
+blocking a *deployment*. Full rationale, measurements and operating instructions:
+[`docs/DEPENDENCY-SCANNING.md`](docs/DEPENDENCY-SCANNING.md).
+
+Run it with `gh workflow run security-deps.yml`, or from **Actions → security-deps
+→ Run workflow**. Run it after any dependency change.
+
 ---
 
 ## 10. Important decisions
@@ -234,13 +259,14 @@ documents the four conditions a suppression must satisfy.
 |---|---|
 | One chart, template-guarded strategies | `deployment.yaml` renders only for `standard`; a Deployment and Rollout can never coexist and fight over ReplicaSets. Proven by `scripts/verify-chart-exclusivity.sh` in CI and re-checked in `verify.sh`. |
 | Argo CD is the sole cluster writer | Eliminates CI-vs-GitOps drift. |
-| Shared ALB via `group.name` | One load balancer for Argo CD + ShopFast (~$18/mo saved). |
+| Shared ALB via `group.name` | One load balancer for Argo CD + ShopFast + Grafana (~$36/mo saved). |
 | EKS access entries, not `aws-auth` | Declarative, survives cluster recreation. |
 | VictoriaMetrics over kube-prometheus-stack | Same PromQL/Prometheus API, materially lower memory. |
 | Non-blocking ACM validation | Pending DNS delegation cannot hang `terraform apply`. |
 | Manual promotion by default | A first deploy has no metric history to analyse; opt into automation later. |
 | Single NAT gateway | Deliberate cost trade-off; noted as a known limitation. |
-| Dependency scan in reporting mode | See §9 — accepted risk, documented and revisitable. |
+| Dependency scan in reporting mode | See §9.1 — accepted risk, documented and revisitable. |
+| Dependency scan out of the deploy path | See §9.2 — an unstable third-party feed must not gate delivery. |
 
 **Estimated cost:** ~US$310–340/month (EKS $73 · 3×t3.large ~$190 · NAT ~$33 · ALB ~$18).
 
@@ -255,29 +281,33 @@ aws eks update-kubeconfig --region us-east-1 --name <project>-eks
 # Argo CD dashboard
 open https://argocd.shopfast.royalbengal.xyz     # user: admin
 
-# Grafana password (generated in-cluster, never in git)
-kubectl -n monitoring get secret grafana-admin-credentials \
-  -o jsonpath='{.data.admin-password}' | base64 -d
-
-# Grafana UI (admin access only; not publicly exposed by default)
-kubectl -n monitoring port-forward svc/vm-grafana 3000:80
+# Grafana dashboard
+open https://grafana.shopfast.royalbengal.xyz    # user: admin
 
 # Rollout state
 kubectl -n shopfast get rollout shopfast -o wide
+
+# Dependency vulnerability scan (out-of-band — see §9.2)
+gh workflow run security-deps.yml
 
 # Prove the strategy invariant locally
 bash scripts/verify-chart-exclusivity.sh
 ```
 
-> Grafana is intentionally **not** published on the public ALB — only Argo CD and
-> ShopFast are. The port-forward above is for administrative access to an
-> internal tool, not the delivery path.
+> Grafana is published on the shared ALB with its own ACM SAN and hardened
+> `grafana.ini` (anonymous access off, sign-up off, brute-force protection,
+> secure cookies, HSTS, CSP). Its admin password is set out-of-band and is
+> never committed.
 
 ## Known limitations
 
-- **Dependency scanning is in reporting mode** — see §9. Known criticals exist in
-  the Spring/Tomcat HTTP stack with no upstream fix available.
-- `royalbengal.xyz` had no hosted zone at build time; public HTTPS depends on the
-  DNS step in `docs/DNS-CPANEL.md`.
+- **Dependency scanning is in reporting mode** — see §9.1. Known criticals exist
+  in the Spring/Tomcat HTTP stack with no upstream fix available.
+- **The dependency scan is manual** — see §9.2. The pipeline renderer emits
+  `workflow_dispatch` only, so `security-deps` must be triggered (or scheduled by
+  adding a `schedule:` trigger in GitHub). Run it after any dependency change.
+- `royalbengal.xyz` stays on cPanel — public HTTPS depends on the CNAME records
+  in `docs/DNS-CPANEL.md`, and those must be updated by hand if the ALB is
+  recreated.
 - Single NAT gateway — egress is not HA across AZs.
 - Rollout analysis is scaffolded but disabled by default (manual promotion).
