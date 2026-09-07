@@ -134,6 +134,15 @@ spec:
           # certificate-arn is committed from terraform state by build_push;
           # it must carry a SAN for this hostname or the ALB serves the wrong
           # certificate and browsers refuse the connection.
+          #
+          # ARN CORRECTED 2026-09-07: this file still held a305f33d, the RETIRED
+          # 2-SAN certificate (argocd + apex only — no grafana SAN). The
+          # replacement 3-SAN certificate faa631c6 was minted during the ACM fix
+          # and written into gitops/applications/shopfast/values.yaml, but
+          # set-grafana-cert.py only runs in build_push, and no build_push had
+          # run since. The two committed copies therefore disagreed, which is
+          # exactly what verify-gitops-manifests.sh check 5 exists to catch —
+          # and it caught it on its first opportunity.
           ingress:
             enabled: true
             ingressClassName: alb
@@ -151,7 +160,7 @@ spec:
               alb.ingress.kubernetes.io/success-codes: "200"
               alb.ingress.kubernetes.io/group.name: shopfast-platform
               alb.ingress.kubernetes.io/group.order: "30"
-              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
+              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/faa631c6-ce37-4718-8421-9389eddf9f01"
 
           grafana.ini:
             server:
@@ -228,8 +237,8 @@ spec:
       # resource with the argocd.argoproj.io/sync-options: Replace=true
       # annotation — never to the whole Application.
       #
-      # Every other Application in this repo (root, shopfast, dashboards,
-      # argo-rollouts) already runs without Replace. This one was the outlier.
+      # argo-rollouts DOES set Replace=true and that is correct: it installs
+      # large CRDs and provisions no PVC at all.
       - ServerSideApply=true
     retry:
       limit: 5

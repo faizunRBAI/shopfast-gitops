@@ -133,10 +133,11 @@ if [ -f "${MONITORING}" ]; then
   fi
 fi
 
-# 7. NO APPLICATION-WIDE Replace=true.
+# 7. Replace=true IS ONLY A DEFECT ON A CHART THAT PROVISIONS STORAGE.
+#
 #    Replace=true makes Argo CD use `kubectl replace`: it posts the WHOLE object
-#    as the chart renders it and discards server-side field ownership. Any chart
-#    that provisions a PersistentVolumeClaim is then permanently unsyncable —
+#    as the chart renders it and discards server-side field ownership. On a
+#    chart that provisions a PersistentVolumeClaim that is fatal and permanent —
 #    the rendered PVC omits volumeName/storageClassName, the binding controller
 #    has written both, and the API server rejects the mutation:
 #
@@ -148,6 +149,19 @@ fi
 #    what made it dangerous — the app simply stopped being able to deliver any
 #    future change (including the certificate ARN written by set-grafana-cert.py).
 #
+#    BUT Replace=true is ALSO the documented, correct workaround for installing
+#    large CRDs: a CRD manifest routinely exceeds the 262144-byte
+#    kubectl.kubernetes.io/last-applied-configuration annotation limit that
+#    client-side apply depends on. `argo-rollouts` (installCRDs: true) provisions
+#    NO PersistentVolumeClaim — verified live, `kubectl -n argo-rollouts get pvc`
+#    returns nothing — so Replace=true there is safe and intentional.
+#
+#    A BLANKET BAN WAS THE BUG (2026-09-07): the first run of this check failed
+#    the build on argo-rollouts, a chart the failure mode cannot apply to. A
+#    guard that fires on a condition that cannot cause harm trains people to
+#    ignore it. So the check is now CONDITIONAL: Replace=true is a failure only
+#    on an Application whose chart declares persistence/PVC storage.
+#
 #    A genuinely immutable object that must be replaced is scoped with the
 #    per-resource annotation `argocd.argoproj.io/sync-options: Replace=true`,
 #    never with an Application-wide syncOption.
@@ -158,10 +172,23 @@ fi
 for f in "${ROOT_APP}" "${CHILDREN_DIR}"/*.yaml; do
   [ -f "$f" ] || continue
   name="$(basename "$f")"
-  if sed -E 's/#.*$//' "$f" | grep -qE '^[[:space:]]*-[[:space:]]*Replace=true[[:space:]]*$'; then
-    fail "${name}: sets Application-wide Replace=true — this breaks any chart with a PersistentVolumeClaim (spec is immutable once Bound). Use ServerSideApply, or scope Replace to one resource with the argocd.argoproj.io/sync-options annotation"
-  else
+
+  body="$(sed -E 's/#.*$//' "$f")"
+
+  if ! printf '%s' "${body}" | grep -qE '^[[:space:]]*-[[:space:]]*Replace=true[[:space:]]*$'; then
     pass "${name}: no Application-wide Replace=true"
+    continue
+  fi
+
+  # Replace=true IS set. Does this chart provision storage? Look for the values
+  # keys that request a PVC: `persistence.enabled: true`, or a `storage:` block
+  # declaring a volume request.
+  if printf '%s' "${body}" | grep -qE '^[[:space:]]*persistence:[[:space:]]*$' \
+     || printf '%s' "${body}" | grep -qE '^[[:space:]]*storage:[[:space:]]*$' \
+     || printf '%s' "${body}" | grep -qE '^[[:space:]]*(storageClass|storageClassName|volumeClaimTemplate):' ; then
+    fail "${name}: sets Application-wide Replace=true AND provisions persistent storage — a Bound PVC's spec is immutable, so every sync will be rejected forever. Use ServerSideApply, or scope Replace to one resource with the argocd.argoproj.io/sync-options annotation"
+  else
+    pass "${name}: Replace=true present but chart provisions no PVC (CRD-install case — safe)"
   fi
 done
 
