@@ -151,7 +151,7 @@ spec:
               alb.ingress.kubernetes.io/success-codes: "200"
               alb.ingress.kubernetes.io/group.name: shopfast-platform
               alb.ingress.kubernetes.io/group.order: "30"
-              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
+              alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:241533126054:certificate/faa631c6-ce37-4718-8421-9389eddf9f01"
 
           grafana.ini:
             server:

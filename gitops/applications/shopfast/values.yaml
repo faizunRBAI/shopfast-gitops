@@ -26,7 +26,7 @@ replicaCount: 3
 
 image:
   repository: 241533126054.dkr.ecr.us-east-1.amazonaws.com/shopfast-gitops-shopfast
-  tag: "49d62e8"
+  tag: "fe97024"
   pullPolicy: IfNotPresent
 
 release:
@@ -44,7 +44,7 @@ ingress:
   # Written by CI from the ACM certificate ARN in terraform state, then
   # committed. Empty until the first build_push runs against a provisioned
   # certificate; the ALB then serves this host over HTTPS.
-  certificateArn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
+  certificateArn: "arn:aws:acm:us-east-1:241533126054:certificate/faa631c6-ce37-4718-8421-9389eddf9f01"
 
 blueGreen:
   autoPromotionEnabled: false
