@@ -48,6 +48,17 @@
 #   Every fallback below is therefore wrapped: (A or B) > threshold.
 #   scripts/verify-gitops-manifests.sh check 10 asserts this.
 #
+# *** ANNOTATIONS ARE GO text/template, NOT MetricsQL. ***
+#   They have NO arithmetic. `mulf`, `add`, and the other MetricsQL helpers do
+#   NOT exist there, and the VM operator's admission webhook REJECTS the whole
+#   VMRule if one is used:
+#       admission webhook "vmrule.victoriametrics.com" denied the request:
+#       error parsing annotation template: function "mulf" not defined
+#   So any unit conversion belongs in the EXPRESSION, where arithmetic is real.
+#   The annotation then only formats $value with `printf`. A useful side
+#   effect: the threshold and the message end up in the SAME units, so the
+#   number a reader sees is the number that tripped the rule.
+#
 # Every expression here was executed against the live vmsingle before being
 # committed — not written from the metric names alone.
 # ---------------------------------------------------------------------------
@@ -194,25 +205,33 @@ spec:
         # ------------------------------------------------------------------
         # SATURATION — GC overhead, the JVM's honest pressure signal.
         #
-        # jvm_gc_overhead is the fraction of wall time spent in GC. It is a far
+        # jvm_gc_overhead is the FRACTION of wall time spent in GC. It is a far
         # better saturation signal than CPU% (which pages people for a JIT
         # warm-up) and than heap-used (which is SUPPOSED to approach the limit
-        # before a collection). Live baseline on this app: 0.00002 — so the 0.3
+        # before a collection). Live baseline on this app: 0.00002 — so a 30%
         # threshold has three orders of magnitude of headroom and will only
         # fire on a real leak or an undersized heap.
+        #
+        # UNITS: the metric is a fraction; the message speaks percent. The
+        # conversion is done HERE, in the expression, because annotations are
+        # Go templates with no arithmetic (see the header note on `mulf`).
+        # Multiplying by 100 also makes `> 30` read in the same units as the
+        # message, so the number a reader sees is the number that tripped it.
         #
         # No zero-fallback here: this is a gauge that always has a series, so
         # there is no empty-numerator ambiguity to resolve.
         # ------------------------------------------------------------------
         - alert: ShopFastReleaseGCSaturation
           expr: |
-            max by (version, release_color) (jvm_gc_overhead{job="shopfast"}) > 0.3
+            (
+              100 * max by (version, release_color) (jvm_gc_overhead{job="shopfast"})
+            ) > 30
           for: 15m
           labels:
             severity: warning
             component: shopfast
           annotations:
-            summary: "Release {{ $labels.version }} is spending {{ printf \"%.0f\" (mulf $value 100) }}% of wall time in GC"
+            summary: "Release {{ $labels.version }} is spending {{ printf \"%.0f\" $value }}% of wall time in GC"
             description: >-
               Sustained GC overhead above 30% means the JVM is thrashing —
               latency will degrade before anything errors. Compare heap usage

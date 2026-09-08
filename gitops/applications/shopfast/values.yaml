@@ -1,12 +1,21 @@
 # ---------------------------------------------------------------------------
 # DEPLOYED STATE — this file is the GitOps source of truth for ShopFast.
 #
-# The `image` and `ingress.certificateArn` lines below are REWRITTEN BY CI
-# (build_push stage) on every successful build. CI commits the change back to
-# this repo; Argo CD then observes the new desired state and drives the rollout.
+# *** THIS FILE IS OWNED BY CI. EDIT IT WITH EXTREME CARE. ***
+#   The `image` and `ingress.certificateArn` lines below are REWRITTEN BY CI
+#   (build_push stage) on every successful build, and CI commits the change
+#   back to this repo. Argo CD then observes the new desired state and drives
+#   the rollout. CI never talks to the cluster — changing this file is the ONLY
+#   way a new version reaches production.
 #
-# CI never talks to the cluster. Changing this file is the only way a new
-# version reaches production.
+#   CONSEQUENCE, learned the hard way on 2026-09-08: rewriting this file
+#   wholesale from a stale local copy REVERTS the deployed image tag to the
+#   bootstrap placeholder. The pods then fail with
+#       InvalidImageName: couldn't parse image name
+#       "PLACEHOLDER_REGISTRY/shopfast:bootstrap"
+#   the ReplicaSet goes to zero ready replicas, and the site returns 503.
+#   When editing an unrelated key here, change ONLY that key — never
+#   regenerate the whole file from memory or from an older revision.
 #
 # SINGLE WRITER: every environment-specific value the chart needs lives HERE.
 # Nothing may be injected into the shopfast Application object at bootstrap
@@ -25,8 +34,9 @@ strategy: bluegreen
 replicaCount: 3
 
 image:
-  repository: PLACEHOLDER_REGISTRY/shopfast
-  tag: "bootstrap"
+  # WRITTEN BY CI (scripts/gitops-commit.sh). Do not hand-edit these two lines.
+  repository: 241533126054.dkr.ecr.us-east-1.amazonaws.com/shopfast-gitops-shopfast
+  tag: "6dc4cff"
   # Always, matching the chart default. Tags here are unique Git SHAs so this
   # normally changes nothing — it only matters when a tag is reused or moved,
   # where IfNotPresent would serve cached layers while reporting the new tag.
@@ -45,9 +55,9 @@ ingress:
   enabled: true
   className: alb
   host: shopfast.royalbengal.xyz
-  # Written by CI from the ACM certificate ARN in terraform state, then
-  # committed. Empty until the first build_push runs against a provisioned
-  # certificate; the ALB then serves this host over HTTPS.
+  # WRITTEN BY CI from the ACM certificate ARN in terraform state. Must stay in
+  # lockstep with the Grafana copy in gitops/monitoring/values.yaml —
+  # verify-gitops-manifests.sh check 5 fails the build if they diverge.
   certificateArn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
 
 blueGreen:
