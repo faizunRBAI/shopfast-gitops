@@ -36,7 +36,7 @@ replicaCount: 3
 image:
   # WRITTEN BY CI (scripts/gitops-commit.sh). Do not hand-edit these two lines.
   repository: 241533126054.dkr.ecr.us-east-1.amazonaws.com/shopfast-gitops-shopfast
-  tag: "37e79d0"
+  tag: "13a7df9"
   # Always, matching the chart default. Tags here are unique Git SHAs so this
   # normally changes nothing — it only matters when a tag is reused or moved,
   # where IfNotPresent would serve cached layers while reporting the new tag.
