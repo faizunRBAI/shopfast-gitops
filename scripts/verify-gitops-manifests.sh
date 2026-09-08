@@ -346,6 +346,114 @@ if [ -f "${LABEL_SYNC}" ]; then
   fi
 fi
 
+# 10. AN ALERT RULE THAT CANNOT FIRE IS WORSE THAN NO ALERT AT ALL.
+#
+#     This is check 8's failure mode moved up a layer, and it is worse. A scrape
+#     that collects nothing produces a visibly empty dashboard panel. An
+#     ALERTING rule that cannot fire simply stays `inactive` forever — and
+#     `inactive` is exactly what a healthy system looks like. There is no
+#     symptom until the incident it was written for happens and nothing fires.
+#
+#     Every pattern below is one that was ACTUALLY WRITTEN against this metric
+#     set and caught by querying the live store, not by review.
+#
+#     SCOPE: only committed VMRule bodies are graded, and comments are stripped
+#     first, because the rule files DOCUMENT these traps in prose. A guard that
+#     trips over its own explanation is a broken guard (check 7's first
+#     revision, attempt 24).
+RULE_FILES="$(grep -rlE '^kind:[[:space:]]*VMRule' gitops 2>/dev/null || true)"
+if [ -z "${RULE_FILES}" ]; then
+  pass "no committed VMRule manifests to check"
+else
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] || continue
+    name="${f#gitops/}"
+
+    # `expr:` opens a YAML block scalar, so an expression spans many lines.
+    # Grading the whole comment-free body is the safe over-approximation.
+    body="$(sed -E 's/#.*$//' "$f")"
+
+    rule_ok=1
+
+    # (a) Histogram buckets Spring Boot does not publish.
+    #     Verified: /api/v1/series?match[]=http_server_requests_seconds_bucket
+    #     returns []. percentiles-histogram is not enabled, so any
+    #     histogram_quantile() over it matches nothing. Three dashboard panels
+    #     had queried it, empty since the day they shipped.
+    if printf '%s\n' "${body}" | grep -qE 'http_server_requests_seconds_bucket'; then
+      fail "${name}: references http_server_requests_seconds_bucket — Spring Boot publishes this timer as sum/count/max only (percentiles-histogram is disabled), so the expression matches nothing and the rule can never fire. Use the mean: rate(..._sum) / rate(..._count)"
+      rule_ok=0
+    fi
+
+    # (b) `up` selected by an application-owned label. `up` is SYNTHESISED by
+    #     the scraper: it carries service-discovery labels and the scrape's own
+    #     relabels (pod_hash, strategy) but NEVER Micrometer common tags.
+    #         up{application="shopfast"} -> EMPTY (a category error, not an
+    #                                              outage)
+    #     Such a rule cannot fire even during a total outage — the precise
+    #     moment it was supposed to work. Matched INSIDE an up{...} selector
+    #     only: these label names are perfectly valid on app metrics.
+    if printf '%s\n' "${body}" \
+         | grep -qE 'up\{[^}]*(application|version|release_color)[[:space:]]*=~?'; then
+      fail "${name}: selects up{} by an application label (application/version/release_color). up is synthesised by the scraper and carries none of the Micrometer common tags, so this matches nothing and stays inactive even during a total outage. Key on pod_hash/job, or use an app metric such as process_uptime_seconds"
+      rule_ok=0
+    fi
+
+    # (c) THE ZERO-FALLBACK PRECEDENCE TRAP — an alert that fires FOREVER.
+    #
+    #     PromQL binds `or` LOOSER than the comparison operators, so
+    #         A or B > 1     parses as     A or (B > 1)
+    #     The threshold is applied only to the FALLBACK, never to A. A is then
+    #     returned whenever it has any series at all, so the rule fires
+    #     permanently from the moment it ships. Verified live on vmsingle with
+    #     a real error rate of 0 against a `> 1` threshold:
+    #         A or B > 1     -> {version="6dc4cff"} = 0    (0 is not > 1: WRONG)
+    #         (A or B) > 1   -> []                          (correct)
+    #
+    #     This is the inverse of (a) and (b): instead of never firing it never
+    #     STOPS, which burns trust in every other rule beside it.
+    #
+    #     DETECTION: a rule body containing a zero-fallback (`or` ... `0 *`)
+    #     must apply its threshold to a PARENTHESISED expression — i.e. the
+    #     comparison is preceded by a closing paren. A bare
+    #     `<newline>  > 5` after a fallback is the broken shape.
+    if printf '%s\n' "${body}" | grep -qE '^[[:space:]]*or[[:space:]]*$' \
+       && printf '%s\n' "${body}" | grep -qE '^[[:space:]]*0[[:space:]]*\*'; then
+      # Every threshold comparison in a fallback-bearing file must be attached
+      # to a closing paren: `) > 5`. A comparison that starts its own line with
+      # no preceding `)` is the unparenthesised form.
+      if printf '%s\n' "${body}" | grep -qE '^[[:space:]]*[<>=!]=?[[:space:]]*[0-9]'; then
+        fail "${name}: a zero-fallback (\`or 0 * ...\`) is compared without parentheses. PromQL binds \`or\` looser than \`>\`, so \`A or B > N\` parses as \`A or (B > N)\` — the threshold never applies to A and the alert fires permanently. Wrap the whole expression: (A or B) > N"
+        rule_ok=0
+      else
+        pass "${name}: zero-fallback expressions are parenthesised before comparison"
+      fi
+    fi
+
+    # (d) A rule that groups by `version` should pin a job. Blue/green renders a
+    #     preview Service as well as the active one, so the same pods are
+    #     scraped under job="shopfast" AND job="shopfast-preview". Without a job
+    #     selector every rate is counted twice and a ratio can exceed 100%.
+    #     WARNING, not a failure: double-counting distorts a threshold but the
+    #     rule still fires, and a rule may legitimately span jobs.
+    if printf '%s\n' "${body}" | grep -qE 'by[[:space:]]*\([^)]*version'; then
+      if printf '%s\n' "${body}" | grep -qE 'job[[:space:]]*=[[:space:]]*"shopfast"'; then
+        pass "${name}: release-grouped rules pin job=\"shopfast\" (preview Service excluded)"
+      else
+        warn "${name}: groups by version without pinning job=\"shopfast\" — the preview Service scrapes the same pods, so rates may double-count"
+      fi
+    fi
+
+    if [ "${rule_ok}" -eq 1 ]; then
+      n_alerts="$(printf '%s\n' "${body}" | grep -cE '^[[:space:]]*-[[:space:]]*alert:')"
+      pass "${name}: ${n_alerts} alert rule(s), no known-empty or always-firing selectors"
+    fi
+  done <<EOF
+${RULE_FILES}
+EOF
+fi
+
 echo
 if [ "${FAILURES}" -gt 0 ]; then
   printf '\033[1;31mGitOps manifest verification FAILED (%s problem(s)).\033[0m\n' "${FAILURES}"

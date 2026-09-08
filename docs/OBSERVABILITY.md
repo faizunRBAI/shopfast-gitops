@@ -8,6 +8,7 @@ What is collected, by what, and where to look.
 |---|---|---|
 | VictoriaMetrics stack (VM operator, vmsingle, vmagent, vmalert, Grafana) | `gitops/monitoring/values.yaml` | `monitoring` Application |
 | Grafana dashboards (ConfigMaps) | `gitops/monitoring/dashboards/` | `dashboards` Application |
+| **Alerting rules (VMRule)** | `gitops/monitoring/alerts/` | `alerts` Application |
 | App metrics scrape | `application/helm/shopfast/templates/servicescrape.yaml` | `shopfast` Application (Helm) |
 | Control-plane metrics | `gitops/observability-controllers/` | `observability-controllers` Application |
 | Console version label | `gitops/label-sync/` | `label-sync` Application |
@@ -44,7 +45,7 @@ Declared in `application/src/main/resources/application.yml` under
 | Label | Value | Example |
 |---|---|---|
 | `application` | constant | `shopfast` |
-| `version` | **the Git SHA** | `5274b56` |
+| `version` | **the Git SHA** | `6dc4cff` |
 | `release_color` | blue/green colour | `blue` |
 
 `version` here is the release key that everything else in this system speaks:
@@ -55,7 +56,7 @@ label-sync CronJob.
 
 | Label | Value | Example |
 |---|---|---|
-| `pod_hash` | pod-template hash | `64d7d69bb5` |
+| `pod_hash` | pod-template hash | `68c4fddbff` |
 | `strategy` | delivery strategy | `bluegreen` |
 
 ### Producer 3 — service discovery
@@ -191,6 +192,139 @@ one unlabelled line. Use `vector(0)` only on single-value aggregate panels.
 
 ---
 
+# ALERTING
+
+Rules live in `gitops/monitoring/alerts/shopfast-release.yaml` as a `VMRule`,
+reconciled by the `alerts` Application and evaluated by the vmalert instance the
+monitoring stack already runs. No extra pods, storage or AWS spend.
+
+## What "firing" means here — read this before relying on it
+
+`gitops/monitoring/values.yaml` runs vmalert with `notifier.blackhole: "true"`
+and `alertmanager.enabled: false` (Tier 1: no receiver). So a firing alert is
+**visible but not pushed**:
+
+| Where | Firing alert appears? |
+|---|---|
+| vmalert API `/api/v1/rules`, `/api/v1/alerts` | yes |
+| Grafana (vmalert datasource, `ALERTS{...}` in PromQL) | yes |
+| Slack / PagerDuty / email | **no — nothing is sent** |
+
+Confirmed by the chart's own always-on `Watchdog` rule, which reports
+`state: "firing"` with a populated `alerts[]` array through this exact
+configuration.
+
+**These are alerts you have to look at, not alerts that find you.** Turning them
+into real notifications is one change: enable `alertmanager` in the values file,
+drop the `notifier.blackhole` flag, and configure a receiver.
+
+## Selection
+
+vmalert runs with `selectAllByDefault: true`, so any `VMRule` in a watched
+namespace is picked up with **no label matching required**. Verified: 34
+chart-shipped rules are `operational` through the same mechanism. If a rule ever
+fails to appear, suspect the CRD or the Application sync, not a selector.
+
+## The rules
+
+All five group by release, and every expression was executed against the live
+vmsingle before being committed.
+
+| Alert | Signal | Threshold | For | Severity |
+|---|---|---|---|---|
+| `ShopFastReleaseHighErrorRate` | 5xx ratio by version | > 5% | 10m | critical |
+| `ShopFastReleaseHighClientErrorRate` | 4xx ratio by version | > 25% | 15m | warning |
+| `ShopFastTargetsDown` | scrape targets down | any | 5m | critical |
+| `ShopFastNoMetrics` | `absent(up)` | — | 10m | critical |
+| `ShopFastReleaseGCSaturation` | `jvm_gc_overhead` | > 0.3 | 15m | warning |
+| `ShopFastReleaseErrorLogSpike` | ERROR logs/sec | > 1 | 10m | warning |
+
+Why these, per the golden signals — **alert on symptoms users feel, and every
+alert needs an action**:
+
+- **Errors** is the promote/abort criterion, and it names the offending SHA in
+  the annotation so the action is unambiguous.
+- **4xx separately**, because a release that 404s routes the previous one served
+  is broken while erroring nothing.
+- **Availability** is split in two on purpose. `up == 0` catches pods that fail;
+  `absent(up)` catches the scrape disappearing entirely — a case where an
+  `up == 0` rule has no series to be zero and goes quiet exactly when things are
+  worst.
+- **Saturation** uses `jvm_gc_overhead` (fraction of wall time in GC), not CPU%
+  — CPU pages people for a JIT warm-up. Live baseline is `0.00002`, so the 0.3
+  threshold has three orders of magnitude of headroom.
+- **Error logs** catch failures that never reach an HTTP status: a failing
+  scheduled job, or an exception swallowed before the response is written.
+
+## THE PRECEDENCE TRAP — an alert that fires forever
+
+This one was caught by querying the live store, not by review, and it is the
+inverse of every other trap in this document: instead of never firing, the rule
+never *stops*.
+
+**PromQL binds `or` looser than the comparison operators.** So a zero-fallback
+written the obvious way:
+
+```promql
+A or 0 * B > 1
+```
+
+parses as `A or (0 * B > 1)`. The threshold is applied **only to the fallback**,
+never to `A`. `A` is then returned whenever it has any series at all. Verified
+live, with a real error rate of zero against a `> 1` threshold:
+
+```
+A or B > 1      ->  {version="6dc4cff"} = 0     0 is not > 1 — WRONG
+(A or B) > 1    ->  []                          correct
+```
+
+An alert shipped that way fires from the moment it lands, permanently, while
+looking entirely reasonable in review. That burns trust in every other rule
+beside it.
+
+**Always parenthesise the whole expression before the comparison:**
+`(A or B) > N`. `scripts/verify-gitops-manifests.sh` check 10 enforces this.
+
+## The guard
+
+Check 10 in `scripts/verify-gitops-manifests.sh` grades every committed VMRule,
+in the `security` stage, before any AWS resource is touched. It refuses:
+
+1. `http_server_requests_seconds_bucket` — buckets that do not exist
+2. `up{}` selected by an application label — matches nothing, even in an outage
+3. an unparenthesised zero-fallback comparison — fires forever
+
+and warns when a version-grouped rule does not pin `job="shopfast"`
+(preview-Service double-counting).
+
+Comments are stripped before grading, because these files document the traps in
+prose and a guard that trips over its own explanation is a broken guard.
+
+## Verifying a rule actually works
+
+`inactive` is indistinguishable from healthy, so silence proves nothing. Test
+both directions against the live store — invert the threshold and confirm the
+rule *can* return the labelled series:
+
+```
+(expr) > 5     ->  []                              inactive when healthy
+(expr) > -1    ->  {version="6dc4cff",...} = 0     fires when crossed
+```
+
+Then confirm vmalert loaded it:
+
+```
+kubectl -n monitoring get vmrule shopfast-release
+kubectl -n monitoring exec deploy/vmalert-vm -c vmalert -- \
+  wget -qO- http://127.0.0.1:8080/api/v1/rules
+```
+
+`health: "ok"` with a non-empty `lastEvaluation` means it is being evaluated. A
+rule with `lastError` set is being evaluated and failing — different problem,
+visible in the same place.
+
+---
+
 ## Control-plane metrics: why a Service is required
 
 Neither Argo CD nor Argo Rollouts ships a Service in front of its metrics port
@@ -236,7 +370,7 @@ means it matches too much. Cross-check the IPs against `get pods -o wide`.
 
 Helm renders `app.kubernetes.io/version` from `.Chart.AppVersion`, a constant in
 `Chart.yaml`. The image tag is rewritten by CI on every build. So without this
-job the Argo CD console shows `1.0.0` while pods run `5274b56`.
+job the Argo CD console shows `1.0.0` while pods run the real SHA.
 
 The CronJob runs every minute, reads the image off the live Rollout (or
 Deployment), and patches the label to the real tag. It no-ops when the label is
@@ -294,3 +428,28 @@ bitnami/kubectl:latest -> pulls, Client Version v1.37.0
 a day on a mutable tag is how it breaks silently later. To refresh the digest,
 pull `latest` and read back `.status.containerStatuses[0].imageID` — never write
 a `sha256:` from memory.
+
+---
+
+## imagePullPolicy is `Always`
+
+Both values files set `image.pullPolicy: Always`.
+
+In the normal case this changes nothing: tags are unique Git SHAs, so the image
+is never already on the node and both policies pull identically. The difference
+appears only when a tag is **reused or moved** — a rebuild of the same SHA after
+an ECR lifecycle expiry, a manually retagged image, or a rollback to a tag whose
+content changed.
+
+With `IfNotPresent`, a node that already cached that tag keeps serving the
+**old layers** while `kubectl describe` reports the new tag. The pod lies about
+what it is running, and nothing errors.
+
+That is the failure this system is least able to tolerate: the version label,
+every dashboard, and the rollback workflow all assume the tag identifies the
+bits. The cost of `Always` is one registry HEAD request per pod start — ECR is
+in-region and the layers are already cached, so no bytes move on a match.
+
+Kubernetes' Configuration Best Practices names the `:latest` + `IfNotPresent`
+combination explicitly. The chart guards already refuse `latest`; this closes
+the other half.

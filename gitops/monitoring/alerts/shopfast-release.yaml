@@ -1,0 +1,254 @@
+# ---------------------------------------------------------------------------
+# RELEASE ALERTING RULES.
+#
+# The Release Comparison dashboard makes a bad release VISIBLE. This makes it
+# NOTICED. Every rule below is release-aware: it groups by `version` (the Git
+# SHA) so that during a blue/green cutover a regression is attributed to the
+# NEW release rather than smeared across a blended average that the healthy
+# release's traffic would hide.
+#
+# WHAT "FIRING" MEANS HERE — read this before trusting these rules on-call.
+#   gitops/monitoring/values.yaml sets vmalert's `notifier.blackhole: "true"`
+#   and disables Alertmanager (Tier 1: no receiver). So these rules ARE
+#   evaluated, every 20s, and a firing alert IS observable:
+#
+#     - Grafana: the vmalert datasource, and ALERTS{alertname="..."} in PromQL
+#     - vmalert API:  /api/v1/rules  and  /api/v1/alerts
+#
+#   but NOTHING IS PUSHED. No Slack message, no page, no email. Turning these
+#   into real notifications is one change — enable alertmanager in the values
+#   file and drop the blackhole flag — and until that happens these are a
+#   dashboard you have to look at, not an alert that finds you.
+#
+# LABEL DISCIPLINE (see docs/OBSERVABILITY.md — THE LABEL CONTRACT):
+#   - `version` / `release_color` / `application` come from the APP (Micrometer)
+#     and exist only on app-exposed metrics.
+#   - `pod_hash` / `strategy` come from the SCRAPE relabels and exist on every
+#     series the scraper produces, INCLUDING synthetic ones like `up`.
+#   - `up` therefore has NO `version`. A rule needing release identity must use
+#     an app metric (process_uptime_seconds), never `up`.
+#   - Blue/green renders TWO Services, so the same pods appear under both
+#     job="shopfast" and job="shopfast-preview". Every rule pins job="shopfast"
+#     so the active release is measured once, not twice.
+#
+# THE ZERO-FALLBACK on ratio rules:
+#   A plain errors/total ratio produces NO SERIES when there are no errors, so
+#   the rule can never distinguish "healthy" from "not reporting". Each
+#   numerator carries `or 0 * <same aggregation over all requests>`, which
+#   yields a real 0 CARRYING the version label. `or vector(0)` would also give
+#   a zero but drops every label, collapsing the per-release breakdown.
+#
+#   *** THE ZERO-FALLBACK MUST BE PARENTHESISED BEFORE THE COMPARISON. ***
+#   PromQL binds `or` LOOSER than `>`, so
+#       A or B > 1     parses as     A or (B > 1)
+#   which returns A whenever A has ANY series — the threshold is not applied to
+#   it at all and the alert fires permanently. Verified live against vmsingle:
+#       A or B > 1     -> {version="6dc4cff"} = 0     (0 is not > 1: WRONG)
+#       (A or B) > 1   -> []                          (correct)
+#   Every fallback below is therefore wrapped: (A or B) > threshold.
+#   scripts/verify-gitops-manifests.sh check 10 asserts this.
+#
+# Every expression here was executed against the live vmsingle before being
+# committed — not written from the metric names alone.
+# ---------------------------------------------------------------------------
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: shopfast-release
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: shopfast
+    app.kubernetes.io/component: release-alerts
+spec:
+  groups:
+    - name: shopfast.release
+      # Matches vmalert's own evaluationInterval. Faster buys nothing: the
+      # scrape interval is 15s, so a shorter window would re-evaluate the same
+      # samples.
+      interval: 30s
+      rules:
+
+        # ------------------------------------------------------------------
+        # ERRORS — the promote/abort criterion.
+        #
+        # Server-side failures are the signal a user actually feels. 5% over a
+        # 5-minute window with a 10-minute `for` means a brief blip during pod
+        # startup does not fire, but a genuinely broken release does — with the
+        # offending SHA named in the annotation.
+        #
+        # The whole ratio is parenthesised before `> 5` — see the precedence
+        # note in the header.
+        # ------------------------------------------------------------------
+        - alert: ShopFastReleaseHighErrorRate
+          expr: |
+            (
+              100 * (
+                sum by (version, release_color) (
+                  rate(http_server_requests_seconds_count{job="shopfast",status=~"5.."}[5m])
+                )
+                or
+                0 * sum by (version, release_color) (
+                  rate(http_server_requests_seconds_count{job="shopfast"}[5m])
+                )
+              )
+              /
+              sum by (version, release_color) (
+                rate(http_server_requests_seconds_count{job="shopfast"}[5m])
+              )
+            ) > 5
+          for: 10m
+          labels:
+            severity: critical
+            component: shopfast
+          annotations:
+            summary: "Release {{ $labels.version }} ({{ $labels.release_color }}) is serving {{ printf \"%.2g\" $value }}% 5xx"
+            description: >-
+              Release {{ $labels.version }} on the {{ $labels.release_color }}
+              side has exceeded a 5% server-error ratio for 10 minutes.
+              If a blue/green promotion is in flight, DO NOT PROMOTE — compare
+              the two versions on the Release Comparison dashboard first.
+              If this release is already active, roll back.
+            dashboard: "Grafana -> ShopFast -> Release Comparison (uid shopfast-releases)"
+            runbook: "docs/ROLLBACK.md"
+
+        # ------------------------------------------------------------------
+        # CLIENT ERRORS — deliberately separate from 5xx.
+        #
+        # A release that starts 404ing routes the previous one served is broken
+        # even though nothing "errored". That shows up only as 4xx, so a 5xx
+        # rule alone would miss an entire class of bad deploy. Warning, not
+        # critical: 4xx is also what a bot scanning for /wp-admin produces.
+        # ------------------------------------------------------------------
+        - alert: ShopFastReleaseHighClientErrorRate
+          expr: |
+            (
+              100 * (
+                sum by (version, release_color) (
+                  rate(http_server_requests_seconds_count{job="shopfast",status=~"4.."}[5m])
+                )
+                or
+                0 * sum by (version, release_color) (
+                  rate(http_server_requests_seconds_count{job="shopfast"}[5m])
+                )
+              )
+              /
+              sum by (version, release_color) (
+                rate(http_server_requests_seconds_count{job="shopfast"}[5m])
+              )
+            ) > 25
+          for: 15m
+          labels:
+            severity: warning
+            component: shopfast
+          annotations:
+            summary: "Release {{ $labels.version }} is serving {{ printf \"%.2g\" $value }}% 4xx"
+            description: >-
+              A sustained client-error ratio usually means routes the previous
+              release served are now missing, or a path/method changed. Compare
+              the 4xx panel across versions before promoting.
+            dashboard: "Grafana -> ShopFast -> Release Comparison (uid shopfast-releases)"
+
+        # ------------------------------------------------------------------
+        # AVAILABILITY — the release that never came up.
+        #
+        # `up` carries pod_hash but NOT version (it is synthesised by the
+        # scraper), so this is the one rule that keys on pod_hash. job is
+        # pinned because the preview Service scrapes the same pods and would
+        # double the count.
+        #
+        # `absent()` is the companion case: if the scrape stops entirely there
+        # are no `up` series at all to be zero, and a rule on `up == 0` would
+        # go quiet exactly when things are worst.
+        # ------------------------------------------------------------------
+        - alert: ShopFastTargetsDown
+          expr: |
+            count by (pod_hash) (up{job="shopfast"} == 0) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: shopfast
+          annotations:
+            summary: "ShopFast pods in ReplicaSet {{ $labels.pod_hash }} are unreachable"
+            description: >-
+              One or more ShopFast targets have failed scraping for 5 minutes.
+              Check pod status and readiness probes:
+              kubectl -n shopfast get pods -o wide
+            runbook: "docs/ROLLBACK.md"
+
+        - alert: ShopFastNoMetrics
+          expr: |
+            absent(up{job="shopfast"})
+          for: 10m
+          labels:
+            severity: critical
+            component: shopfast
+          annotations:
+            summary: "ShopFast is producing no metrics at all"
+            description: >-
+              No up series exists for the shopfast job. Either every pod is
+              gone, or the VMServiceScrape has stopped matching the Service —
+              a scrape that matches nothing reports Synced and Healthy while
+              collecting zero samples. Verify the Service has endpoints:
+              kubectl -n shopfast get endpoints shopfast
+
+        # ------------------------------------------------------------------
+        # SATURATION — GC overhead, the JVM's honest pressure signal.
+        #
+        # jvm_gc_overhead is the fraction of wall time spent in GC. It is a far
+        # better saturation signal than CPU% (which pages people for a JIT
+        # warm-up) and than heap-used (which is SUPPOSED to approach the limit
+        # before a collection). Live baseline on this app: 0.00002 — so the 0.3
+        # threshold has three orders of magnitude of headroom and will only
+        # fire on a real leak or an undersized heap.
+        #
+        # No zero-fallback here: this is a gauge that always has a series, so
+        # there is no empty-numerator ambiguity to resolve.
+        # ------------------------------------------------------------------
+        - alert: ShopFastReleaseGCSaturation
+          expr: |
+            max by (version, release_color) (jvm_gc_overhead{job="shopfast"}) > 0.3
+          for: 15m
+          labels:
+            severity: warning
+            component: shopfast
+          annotations:
+            summary: "Release {{ $labels.version }} is spending {{ printf \"%.0f\" (mulf $value 100) }}% of wall time in GC"
+            description: >-
+              Sustained GC overhead above 30% means the JVM is thrashing —
+              latency will degrade before anything errors. Compare heap usage
+              across versions on the Release Comparison dashboard; if only the
+              new release shows it, that release introduced the pressure.
+
+        # ------------------------------------------------------------------
+        # ERROR LOGS — catches failures that never reach an HTTP status.
+        #
+        # A background task, a failing scheduled job, or an exception swallowed
+        # before the response is written all produce ERROR logs and a clean
+        # 200. This is the only rule that sees them.
+        #
+        # THIS IS THE RULE THAT CAUGHT THE PRECEDENCE BUG. Unparenthesised it
+        # returned a value of 0 against a `> 1` threshold — i.e. it would have
+        # fired permanently from the moment it shipped, while looking correct.
+        # ------------------------------------------------------------------
+        - alert: ShopFastReleaseErrorLogSpike
+          expr: |
+            (
+              sum by (version, release_color) (
+                rate(logback_events_total{job="shopfast",level="error"}[5m])
+              )
+              or
+              0 * sum by (version, release_color) (
+                rate(logback_events_total{job="shopfast"}[5m])
+              )
+            ) > 1
+          for: 10m
+          labels:
+            severity: warning
+            component: shopfast
+          annotations:
+            summary: "Release {{ $labels.version }} is logging {{ printf \"%.2g\" $value }} errors/sec"
+            description: >-
+              Sustained ERROR-level logging without a matching 5xx rate usually
+              means a background task or scheduled job is failing while HTTP
+              responses stay clean. Inspect:
+              kubectl -n shopfast logs -l app.kubernetes.io/name=shopfast --tail=200

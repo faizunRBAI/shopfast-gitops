@@ -31,7 +31,27 @@ image:
   # _validate.tpl REFUSES "latest" and "" -- the deployed tag must be an
   # immutable Git SHA so the running revision is always knowable.
   tag: "bootstrap"
-  pullPolicy: IfNotPresent
+  # ALWAYS, not IfNotPresent.
+  #
+  # The normal case is unaffected: tags here are unique Git SHAs, so the image
+  # is never already on the node and both policies pull identically. The
+  # difference only appears when a tag is REUSED or MOVED -- a rebuild of the
+  # same SHA after an ECR lifecycle expiry, a manually retagged image, or a
+  # rollback to a tag whose content changed. With IfNotPresent, a node that
+  # already cached that tag keeps serving the OLD layers while `kubectl
+  # describe` reports the new tag. The pod lies about what it is running, and
+  # nothing errors.
+  #
+  # That is precisely the failure this system is least able to tolerate: the
+  # entire release story here -- the version label, the dashboards, the
+  # rollback workflow -- assumes the tag identifies the bits. The cost of
+  # Always is one registry HEAD request per pod start (ECR is in-region, the
+  # layers are already cached, so no bytes move on a match).
+  #
+  # k8s Configuration Best Practices names the ":latest + IfNotPresent"
+  # combination explicitly; the guards refuse "latest", and this closes the
+  # other half.
+  pullPolicy: Always
 
 imagePullSecrets: []
 

@@ -1,0 +1,48 @@
+# Alerting rules as VMRule custom resources, evaluated by the vmalert instance
+# the monitoring stack already runs. Managed through GitOps so a threshold
+# change is a reviewed commit rather than an edit that disappears on the next
+# sync.
+#
+# WHY A SEPARATE APPLICATION RATHER THAN A FOLDER IN `dashboards`
+#   Dashboards are ConfigMaps consumed by the Grafana sidecar; VMRules are
+#   custom resources consumed by the VM operator. They have different CRD
+#   prerequisites and different failure modes — a malformed VMRule is rejected
+#   by the operator's admission path, which would otherwise block a dashboard
+#   change that has nothing to do with it. Separate Applications keep those
+#   blast radii apart.
+#
+# SELECTION: gitops/monitoring/values.yaml runs vmalert with
+# `selectAllByDefault: true`, so a VMRule in a watched namespace is picked up
+# with no label matching required. Confirmed live — 34 chart-shipped rules are
+# `operational` under exactly this mechanism.
+#
+# repoURL is committed literally — see the note in shopfast.yaml. A placeholder
+# substituted at apply time is reverted by the root App-of-Apps on its next
+# sync, leaving this Application unable to resolve its own source.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: alerts
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # After the monitoring stack (wave 10), which installs the VMRule CRD and
+    # the operator that reconciles it. Applying a VMRule before its CRD exists
+    # fails the sync outright.
+    argocd.argoproj.io/sync-wave: "15"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/faizunRBAI/shopfast-gitops.git
+    targetRevision: main
+    path: gitops/monitoring/alerts
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
