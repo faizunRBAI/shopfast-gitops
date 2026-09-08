@@ -28,12 +28,32 @@ stages:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - name: Unit tests
+      - name: Unit tests and coverage gate
         working-directory: application
-        run: mvn -B -ntp test
-      - name: Package jar
-        working-directory: application
-        run: mvn -B -ntp -DskipTests package
+        run: |
+          # `mvn verify`, NOT `mvn test`.
+          #
+          # jacoco:check binds to the `verify` lifecycle phase. `mvn test` stops
+          # at `test`: the agent runs and jacoco.exec is written, but the check
+          # goal NEVER executes — the gate would be configured in pom.xml and
+          # enforce nothing, while the stage stayed green. That silent-no-op is
+          # the failure mode scripts/verify-coverage-gate.sh exists to catch.
+          #
+          # verify also runs `package`, so the jar is built here as before; the
+          # separate package step below is no longer needed.
+          #
+          # Thresholds and the exclusion rationale live in application/pom.xml
+          # (jacoco.line.ratio / jacoco.branch.ratio).
+          mvn -B -ntp verify
+      - name: Upload the JaCoCo coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage-report
+          path: |
+            application/target/site/jacoco/index.html
+            application/target/site/jacoco/jacoco.xml
+          retention-days: 30
+          if-no-files-found: warn
 
   - id: security
     kind: security
@@ -88,6 +108,13 @@ stages:
           done
       - name: Verify Blue/Green and Canary never render a Deployment
         run: bash scripts/verify-chart-exclusivity.sh
+      - name: Verify the coverage gate actually enforces
+        run: |
+          # A coverage gate that is configured but never reached is
+          # indistinguishable from a passing build. This asserts the two
+          # properties that make it a gate: haltOnFailure=true in the pom, and a
+          # pipeline phase that actually reaches jacoco:check (verify, not test).
+          bash scripts/verify-coverage-gate.sh
       - name: Verify the GitOps manifests are fully resolved
         run: bash scripts/verify-gitops-manifests.sh
       - name: Verify the gated rollback refuses unsafe targets

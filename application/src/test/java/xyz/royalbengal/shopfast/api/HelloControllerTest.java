@@ -1,5 +1,6 @@
 package xyz.royalbengal.shopfast.api;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -22,6 +23,9 @@ class HelloControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private MeterRegistry meterRegistry;
+
     @Test
     void helloReturnsServiceIdentity() throws Exception {
         mockMvc.perform(get("/api/hello"))
@@ -29,7 +33,41 @@ class HelloControllerTest {
                 .andExpect(jsonPath("$.service").value("shopfast"))
                 .andExpect(jsonPath("$.message").value("Hello from ShopFast"))
                 .andExpect(jsonPath("$.releaseColor").exists())
-                .andExpect(jsonPath("$.version").exists());
+                .andExpect(jsonPath("$.version").exists())
+                .andExpect(jsonPath("$.timestamp").exists());
+    }
+
+    /**
+     * The release identity fields are not decoration: the blue/green and canary
+     * dashboards prove "which revision served this request" from exactly these
+     * two values. The defaults come from @Value fallbacks
+     * (shopfast.release.color:unknown / shopfast.release.version:dev), so in a
+     * test context with no injected env they must still be PRESENT and
+     * non-blank rather than null.
+     */
+    @Test
+    void helloAlwaysCarriesReleaseIdentity() throws Exception {
+        mockMvc.perform(get("/api/hello"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.releaseColor").isNotEmpty())
+                .andExpect(jsonPath("$.version").isNotEmpty());
+    }
+
+    /**
+     * shopfast_hello_requests_total is scraped by VictoriaMetrics and is the
+     * per-release request signal on the Release Comparison dashboard. Nothing
+     * asserted that it actually increments, so a refactor that dropped the
+     * Counter.increment() call would have left the dashboard silently flat
+     * while every other test stayed green.
+     */
+    @Test
+    void helloIncrementsTheRequestCounter() throws Exception {
+        double before = meterRegistry.counter("shopfast_hello_requests_total").count();
+
+        mockMvc.perform(get("/api/hello")).andExpect(status().isOk());
+
+        double after = meterRegistry.counter("shopfast_hello_requests_total").count();
+        assertThat(after).isEqualTo(before + 1.0d);
     }
 
     /**
