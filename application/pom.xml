@@ -190,6 +190,13 @@
               COVERAGE GATE. See the jacoco.* properties above for the threshold
               rationale and the exclusion justification.
 
+              NOTE FOR ANYONE EDITING THESE COMMENTS: an XML comment may never
+              contain a double hyphen. Pasting a raw Maven log line here (they
+              are wrapped in triple hyphens) makes the POM non-parseable and
+              every stage dies at "Non-parseable POM ... in comment after two
+              dashes". That happened on 2026-09-08. Paraphrase log lines; do not
+              paste them.
+
               HOW THE PIPELINE DRIVES THIS (three ways to get it wrong, all of
               which have actually happened on this project):
 
@@ -213,15 +220,15 @@
 
                  A goal invoked from the command line does NOT inherit an
                  <execution>'s <configuration>. `mvn jacoco:check` creates a
-                 synthetic execution that Maven reports as:
+                 SYNTHETIC execution, and Maven prints its id in parentheses on
+                 the goal banner:
 
-                     --- jacoco:0.8.12:check (default-cli) @ shopfast ---
-                                              ^^^^^^^^^^^
+                     jacoco:0.8.12:check (default-cli) @ shopfast
 
-                 not `(jacoco-check)`. That synthetic execution reads ONLY the
-                 plugin-level <configuration>. With the rules nested inside the
-                 named execution, the CLI invocation saw no <rules> at all and
-                 the build died with:
+                 `default-cli`, not `jacoco-check`. That synthetic execution
+                 reads ONLY the plugin-level <configuration>. With the rules
+                 nested inside the named execution, the CLI invocation saw no
+                 <rules> at all and the build died with:
 
                      The parameters 'rules' for goal
                      org.jacoco:jacoco-maven-plugin:0.8.12:check
@@ -229,8 +236,8 @@
 
                  Keeping rules/haltOnFailure at PLUGIN level means BOTH callers
                  see identical thresholds:
-                   - `mvn jacoco:check`  (the coverage stage, CI)
-                   - `mvn verify`        (a local build, via the execution below)
+                   a) `mvn jacoco:check`  (the coverage stage, CI)
+                   b) `mvn verify`        (a local build, via the execution below)
                  The <execution> is retained purely for the phase binding; it
                  deliberately carries no configuration of its own, so the two
                  paths can never drift apart.
