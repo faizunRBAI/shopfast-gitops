@@ -190,7 +190,8 @@
               COVERAGE GATE. See the jacoco.* properties above for the threshold
               rationale and the exclusion justification.
 
-              HOW THE PIPELINE DRIVES THIS (easy to get wrong in two ways):
+              HOW THE PIPELINE DRIVES THIS (three ways to get it wrong, all of
+              which have actually happened on this project):
 
               1. BINDING. jacoco:check binds to the `verify` phase. `mvn test`
                  stops at `test`, which runs prepare-agent and produces
@@ -207,22 +208,89 @@
                  (jacoco.exec + target/classes); without BOTH, JaCoCo resolves
                  nothing and reports 0%.
 
-              scripts/verify-coverage-gate.sh asserts both properties, so an
-              edit that collapses the gate back into `mvn test` or drops the
-              artifact hand-off fails the build instead of disarming the gate.
-              See docs/COVERAGE.md.
+              3. ***CONFIGURATION SCOPE — why <rules> and <haltOnFailure> are
+                 HERE, at plugin level, and NOT inside the <execution> below.***
+
+                 A goal invoked from the command line does NOT inherit an
+                 <execution>'s <configuration>. `mvn jacoco:check` creates a
+                 synthetic execution that Maven reports as:
+
+                     --- jacoco:0.8.12:check (default-cli) @ shopfast ---
+                                              ^^^^^^^^^^^
+
+                 not `(jacoco-check)`. That synthetic execution reads ONLY the
+                 plugin-level <configuration>. With the rules nested inside the
+                 named execution, the CLI invocation saw no <rules> at all and
+                 the build died with:
+
+                     The parameters 'rules' for goal
+                     org.jacoco:jacoco-maven-plugin:0.8.12:check
+                     are missing or invalid
+
+                 Keeping rules/haltOnFailure at PLUGIN level means BOTH callers
+                 see identical thresholds:
+                   - `mvn jacoco:check`  (the coverage stage, CI)
+                   - `mvn verify`        (a local build, via the execution below)
+                 The <execution> is retained purely for the phase binding; it
+                 deliberately carries no configuration of its own, so the two
+                 paths can never drift apart.
+
+                 Note this failed LOUDLY rather than silently — a missing
+                 required parameter is an error, not a default. That is the good
+                 case. It is the reason check 10 in the guard script now asserts
+                 reachability, not just presence.
+
+              scripts/verify-coverage-gate.sh asserts all of these, so an edit
+              that collapses the gate back into `mvn test`, drops the artifact
+              hand-off, or re-nests the rules inside the execution fails the
+              build instead of disarming the gate. See docs/COVERAGE.md.
             -->
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
                 <version>${jacoco.version}</version>
+
+                <!-- PLUGIN-LEVEL configuration: read by BOTH the phase-bound
+                     executions below AND by a direct `mvn jacoco:check` /
+                     `mvn jacoco:report` command line. See point 3 above. -->
                 <configuration>
                     <excludes>
                         <!-- Bootstrap class: main() is not invoked by
                              @SpringBootTest. See the properties block. -->
                         <exclude>xyz/royalbengal/shopfast/ShopFastApplication.class</exclude>
                     </excludes>
+
+                    <!-- THE GATE FAILS THE BUILD. haltOnFailure=false would
+                         turn it into a warning that nobody reads. -->
+                    <haltOnFailure>true</haltOnFailure>
+
+                    <rules>
+                        <rule>
+                            <element>BUNDLE</element>
+                            <limits>
+                                <limit>
+                                    <counter>LINE</counter>
+                                    <value>COVEREDRATIO</value>
+                                    <minimum>${jacoco.line.ratio}</minimum>
+                                </limit>
+                                <!--
+                                  BRANCH stays declared at 0.00 while the
+                                  measured scope has no branches: JaCoCo reports
+                                  a 0/0 counter as 0.00, not 1.00, so any
+                                  positive minimum would fail a build that has
+                                  nothing to cover. Raise jacoco.branch.ratio
+                                  when real conditional logic lands.
+                                -->
+                                <limit>
+                                    <counter>BRANCH</counter>
+                                    <value>COVEREDRATIO</value>
+                                    <minimum>${jacoco.branch.ratio}</minimum>
+                                </limit>
+                            </limits>
+                        </rule>
+                    </rules>
                 </configuration>
+
                 <executions>
                     <!-- Attaches the coverage agent to the surefire JVM. Bound
                          to the default `initialize` phase, so it runs under
@@ -244,7 +312,7 @@
                          if: always() and would be skipped on precisely the run
                          that failed. Generating the report in the always-green
                          test stage guarantees it exists for every run. The
-                         `verify` binding below is retained so a plain local
+                         `verify` binding here is retained so a plain local
                          `mvn verify` still produces the report. -->
                     <execution>
                         <id>jacoco-report</id>
@@ -254,45 +322,18 @@
                         </goals>
                     </execution>
 
-                    <!-- THE GATE. haltOnFailure=true => the build FAILS.
-                         Invoked directly as `mvn jacoco:check` by the coverage
-                         stage; the verify binding keeps a local `mvn verify`
-                         honest too. -->
+                    <!-- Phase binding ONLY, so a local `mvn verify` enforces the
+                         same gate as CI. It carries NO <configuration> on
+                         purpose: the rules and haltOnFailure live at plugin
+                         level above, where the command-line invocation used by
+                         the coverage stage can also see them. Re-nesting them
+                         here would silently restore the (default-cli) failure. -->
                     <execution>
                         <id>jacoco-check</id>
                         <phase>verify</phase>
                         <goals>
                             <goal>check</goal>
                         </goals>
-                        <configuration>
-                            <haltOnFailure>true</haltOnFailure>
-                            <rules>
-                                <rule>
-                                    <element>BUNDLE</element>
-                                    <limits>
-                                        <limit>
-                                            <counter>LINE</counter>
-                                            <value>COVEREDRATIO</value>
-                                            <minimum>${jacoco.line.ratio}</minimum>
-                                        </limit>
-                                        <!--
-                                          BRANCH stays declared at 0.00 while the
-                                          measured scope has no branches: JaCoCo
-                                          reports a 0/0 counter as 0.00, not
-                                          1.00, so any positive minimum would
-                                          fail a build that has nothing to
-                                          cover. Raise jacoco.branch.ratio when
-                                          real conditional logic lands.
-                                        -->
-                                        <limit>
-                                            <counter>BRANCH</counter>
-                                            <value>COVEREDRATIO</value>
-                                            <minimum>${jacoco.branch.ratio}</minimum>
-                                        </limit>
-                                    </limits>
-                                </rule>
-                            </rules>
-                        </configuration>
                     </execution>
                 </executions>
             </plugin>

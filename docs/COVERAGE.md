@@ -35,7 +35,7 @@ The container image build is **unaffected**: `application/Dockerfile` runs
 
 ---
 
-## 2. Two ways a coverage gate silently enforces nothing
+## 2. Three ways a coverage gate silently enforces nothing
 
 ### 2a. The binding trap — `mvn test` never runs `check`
 
@@ -83,6 +83,38 @@ Both paths in the hand-off are load-bearing:
 The upload uses `if-no-files-found: error`. With `warn`, a run that produced no
 coverage data would upload an empty artifact and the failure would surface **two
 jobs later** as a bogus 0%, blamed on the wrong thing.
+
+### 2c. The configuration-scope trap — `(default-cli)` sees a different pom
+
+This one bit for real on **2026-09-08**, on the first run after the job split:
+
+```
+[INFO] --- jacoco:0.8.12:check (default-cli) @ shopfast ---
+                                ^^^^^^^^^^^  not (jacoco-check)
+[ERROR] The parameters 'rules' for goal
+        org.jacoco:jacoco-maven-plugin:0.8.12:check are missing or invalid
+```
+
+**A goal invoked from the command line does not inherit an `<execution>`'s
+`<configuration>`.** `mvn jacoco:check` creates a synthetic `default-cli`
+execution which reads **only** the plugin-level `<configuration>`. With
+`<rules>` and `<haltOnFailure>` nested inside the named `<execution>`, that
+invocation saw no rules at all.
+
+The fix is placement, not a command-line flag: `<rules>` and `<haltOnFailure>`
+live at **plugin level**, so both callers see identical thresholds —
+
+- `mvn jacoco:check` — the coverage stage, in CI
+- `mvn verify` — a local build, via the retained `jacoco-check` execution
+
+The `<execution>` is kept purely for its phase binding and deliberately carries
+**no configuration of its own**, so the two paths cannot drift apart.
+
+Note the direction of this failure: it was **loud**. A missing required
+parameter is an error, not a silently-applied default. That is the good case —
+and it is exactly why check 10 exists (see §6): the settings were *present* and
+*greppable* the whole time, and the guard passed. **Presence is not
+reachability.**
 
 ---
 
@@ -170,10 +202,31 @@ not by lowering the number, but by shrinking what the number measures.
 | 7 | exclusions do not cover app logic | gate hollowed by scope |
 | 8 | the exec-data hand-off exists, with `if-no-files-found: error` | the empty-data trap in §2b |
 | 9 | a report is generated and uploaded | a gate failure with nothing to diagnose from |
+| 10 | `<rules>` + `haltOnFailure` are at **plugin** level | the configuration-scope trap in §2c |
 
-Checks 8 and 9 only apply when the gate runs as its own job. If it is ever
-consolidated back into a single `mvn verify`, check 6 accepts that form and
-check 8 correctly skips — a guard must not refuse a *different correct* layout.
+Checks 8 and 10 only apply when the gate runs as its own job via the goal. If it
+is ever consolidated back into a single `mvn verify`, check 6 accepts that form,
+check 8 correctly skips, and check 10 skips because a phase-bound execution
+*does* apply its own configuration — a guard must not refuse a *different
+correct* layout.
+
+### Why check 10 had to be added
+
+Checks 3 and 5 both **passed** on the pom that produced the `(default-cli)`
+failure. They assert that `haltOnFailure` and the `<minimum>` exist *somewhere*
+in the file. They cannot tell whether the invocation the pipeline actually runs
+can *see* them.
+
+Check 10 closes that by bounding the plugin-level region — from the jacoco
+`<artifactId>` line to its first `<executions>` tag — and requiring `<rules>`
+and `<haltOnFailure>true</haltOnFailure>` inside it. Anything after
+`<executions>` belongs to an execution and is invisible to `mvn jacoco:check`.
+
+That is the general lesson worth carrying to any other gate on this project:
+**a guard that asserts a setting exists has not asserted that the setting
+applies.**
+
+### How the checks match
 
 It matches **structural tokens** (`<haltOnFailure>true</haltOnFailure>`, an
 anchored `mvn` command line), never prose. Both files document this gate at

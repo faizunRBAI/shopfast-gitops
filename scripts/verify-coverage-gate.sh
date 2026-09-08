@@ -5,8 +5,8 @@
 # WHY THIS EXISTS
 #   A coverage gate has one silent failure mode that looks exactly like a
 #   passing build: it is present in the pom, it produces a report, and it
-#   enforces NOTHING. There are three independent ways to reach that state on
-#   this project, and this script asserts against all three:
+#   enforces NOTHING. There are four independent ways to reach that state on
+#   this project, and this script asserts against all of them:
 #
 #     1. BINDING. jacoco:check binds to the `verify` phase. A pipeline that runs
 #        `mvn test` stops at `test` — prepare-agent runs, jacoco.exec is
@@ -24,10 +24,20 @@
 #        is to lower the threshold, which IS silent from then on. So the
 #        artifact hand-off is asserted structurally here.
 #
+#     4. UNREACHABLE CONFIGURATION (added 2026-09-08 after a real CI failure).
+#        The settings can all be PRESENT in the pom and still not be SEEN by the
+#        command the pipeline runs. A goal invoked from the command line does
+#        not inherit an <execution>'s <configuration>: `mvn jacoco:check` runs
+#        as a synthetic `(default-cli)` execution that reads ONLY the
+#        plugin-level <configuration>. With <rules> nested inside the named
+#        <execution>, checks 3 and 5 below both PASSED while the real build died
+#        on "The parameters 'rules' ... are missing or invalid".
+#        Presence is not reachability. Check 10 asserts reachability.
+#
 #   A future edit that "simplifies" the coverage stage back into `mvn test`,
-#   flips haltOnFailure, or drops the artifact hand-off would disarm the gate
-#   without changing a single visible number. This asserts those properties so
-#   that edit fails the build instead.
+#   flips haltOnFailure, drops the artifact hand-off, or re-nests the rules
+#   inside the execution would disarm or break the gate. This asserts those
+#   properties so that edit fails the build instead.
 #
 #   Same reasoning as verify-rollback.sh: a control is only trustworthy if the
 #   thing that makes it a control is itself tested.
@@ -85,6 +95,8 @@ fi
 # --- 3. the gate actually halts the build -----------------------------------
 # The whole point of the gate. haltOnFailure=false is a warning, not a gate.
 # Matched as a complete element so the prose above cannot satisfy it.
+# NOTE: this asserts PRESENCE only. Check 10 asserts it is REACHABLE from the
+# invocation the pipeline uses — the two are genuinely different properties.
 if grep -q '<haltOnFailure>true</haltOnFailure>' "${POM}"; then
   pass "haltOnFailure is true — a build below threshold FAILS"
 elif grep -q '<haltOnFailure>' "${POM}"; then
@@ -233,10 +245,76 @@ else
   fail "no jacoco-coverage-report artifact is uploaded — a gate failure would not be diagnosable from the run"
 fi
 
+# --- 10. the rules must be REACHABLE from the pipeline's invocation ---------
+# PRESENCE IS NOT REACHABILITY. This is the check that checks 3 and 5 cannot
+# make, and its absence cost a real CI failure on 2026-09-08:
+#
+#   [INFO] --- jacoco:0.8.12:check (default-cli) @ shopfast ---
+#                                   ^^^^^^^^^^^ not (jacoco-check)
+#   [ERROR] The parameters 'rules' for goal
+#           org.jacoco:jacoco-maven-plugin:0.8.12:check are missing or invalid
+#
+# Maven applies an <execution>'s <configuration> ONLY when the goal runs via
+# that execution's phase binding. `mvn jacoco:check` from the command line
+# creates a synthetic `default-cli` execution which reads ONLY the PLUGIN-level
+# <configuration>. So when the pipeline invokes the goal directly, <rules> and
+# <haltOnFailure> MUST live at plugin level. Nested in the execution they are
+# present, greppable, and invisible to the actual build.
+#
+# HOW THIS IS DETECTED without an XML parser:
+#   Take the jacoco plugin's own text, from its <artifactId> line up to the
+#   <executions> opening tag. That window is exactly the plugin-level
+#   configuration region — anything after <executions> belongs to an execution.
+#   Requiring <rules> and <haltOnFailure> inside that window proves they are in
+#   plugin scope, not execution scope.
+#
+#   Comments cannot satisfy it: the window is matched for the literal element
+#   tags <rules> and <haltOnFailure>true</haltOnFailure>, and the long comment
+#   in the pom writes them without tags (as "rules"/"haltOnFailure") precisely
+#   so that prose can never stand in for configuration.
+#
+# ONLY ASSERTED for the goal invocation. Under a lifecycle phase (`mvn verify`)
+# the execution's own configuration IS applied, so plugin-level placement is not
+# required and demanding it would refuse a different correct layout.
+if [ "${GATE_INVOCATION}" = "goal" ]; then
+  # Line numbers bounding the jacoco plugin's plugin-level region.
+  jacoco_start="$(grep -n '<artifactId>jacoco-maven-plugin</artifactId>' "${POM}" | head -n1 | cut -d: -f1)"
+  if [ -z "${jacoco_start}" ]; then
+    fail "cannot locate the jacoco plugin block to verify configuration scope"
+  else
+    # First <executions> AFTER the plugin's artifactId ends the plugin-level region.
+    exec_rel="$(tail -n +"${jacoco_start}" "${POM}" | grep -n '<executions>' | head -n1 | cut -d: -f1)"
+    if [ -z "${exec_rel}" ]; then
+      # No executions at all: the whole plugin block is plugin-level.
+      plugin_scope="$(tail -n +"${jacoco_start}" "${POM}")"
+    else
+      plugin_scope="$(tail -n +"${jacoco_start}" "${POM}" | head -n "${exec_rel}")"
+    fi
+
+    scope_ok=1
+    case "${plugin_scope}" in
+      *"<rules>"*) : ;;
+      *) scope_ok=0 ;;
+    esac
+    case "${plugin_scope}" in
+      *"<haltOnFailure>true</haltOnFailure>"*) : ;;
+      *) scope_ok=0 ;;
+    esac
+
+    if [ "${scope_ok}" -eq 1 ]; then
+      pass "<rules> and haltOnFailure are at PLUGIN level — reachable by 'mvn jacoco:check'"
+    else
+      fail "the pipeline runs 'mvn jacoco:check' (a default-cli execution) but <rules>/<haltOnFailure> are not in the plugin-level <configuration> — a CLI-invoked goal does NOT inherit an <execution>'s configuration, so the build dies with \"The parameters 'rules' ... are missing or invalid\""
+    fi
+  fi
+else
+  pass "gate runs in-phase; execution-level configuration is applied (scope check skipped)"
+fi
+
 echo
 if [ "${FAILURES}" -gt 0 ]; then
   printf '\033[1;31mCoverage gate verification FAILED (%s problem(s)).\033[0m\n' "${FAILURES}"
   exit 1
 fi
 
-printf '\033[1;32mCoverage gate verified: present, bound, halting, wired, fed, reported, and invoked by the pipeline.\033[0m\n'
+printf '\033[1;32mCoverage gate verified: present, bound, halting, wired, reachable, fed, reported, and invoked by the pipeline.\033[0m\n'
