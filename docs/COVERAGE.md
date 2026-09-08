@@ -1,10 +1,10 @@
 # Test coverage gate
 
-The `test` stage enforces a JaCoCo line-coverage minimum. A build below the
-threshold **fails**; it is a gate, not a report.
+The **`coverage`** stage enforces a JaCoCo line-coverage minimum. A build below
+the threshold **fails**; it is a gate, not a report.
 
-This document explains the two things that are easy to get wrong about it, and
-why the numbers are what they are.
+This document explains the things that are easy to get wrong about it, and why
+the numbers are what they are.
 
 ---
 
@@ -13,23 +13,34 @@ why the numbers are what they are.
 | | |
 |---|---|
 | Plugin | `jacoco-maven-plugin` 0.8.12, `application/pom.xml` |
-| Enforced in | the `test` stage of the deploy pipeline |
-| Command | `mvn -B -ntp verify` |
+| Tests run in | the `test` stage — `mvn -B -ntp test jacoco:report` |
+| Gate enforced in | the **`coverage`** stage — `mvn -B -ntp jacoco:check` |
 | Blocking? | **Yes** — `haltOnFailure` is `true` |
-| Report | `jacoco-coverage-report` artifact on every run (HTML + XML) |
+| Report | `jacoco-coverage-report` artifact, uploaded by the `test` stage |
+| Hand-off | `coverage-exec-data` artifact (`jacoco.exec` + `target/classes`) |
 | Self-test | `scripts/verify-coverage-gate.sh`, `security` stage |
+
+Pipeline order:
+
+```
+lint -> test -> coverage -> security -> provision -> build_push -> configure -> verify
+```
+
+Coverage is its **own job**, so when it goes red the failure is named for what
+actually broke — not buried inside a test stage that also compiles, packages
+and runs the suite.
 
 The container image build is **unaffected**: `application/Dockerfile` runs
 `mvn -DskipTests package`, so the gate cannot break `build_push`.
 
 ---
 
-## 2. `mvn verify`, NOT `mvn test` — the silent-no-op trap
+## 2. Two ways a coverage gate silently enforces nothing
 
-This is the single most important fact in this document.
+### 2a. The binding trap — `mvn test` never runs `check`
 
 `jacoco:check` binds to the **`verify`** lifecycle phase. `mvn test` stops at
-`test`. With `mvn test`:
+`test`. With `mvn test` alone:
 
 - `prepare-agent` runs,
 - `jacoco.exec` is written,
@@ -39,17 +50,58 @@ This is the single most important fact in this document.
 The gate is fully configured in `pom.xml`, enforces nothing, and the stage is
 green. Nothing in the log says the threshold was skipped.
 
-So the pipeline runs `mvn verify`, and `scripts/verify-coverage-gate.sh` asserts
-that it still does. If someone later "simplifies" the step back to `mvn test`,
-the security stage fails with an explanation rather than quietly disarming the
-gate.
+The `coverage` stage therefore invokes the **goal directly** — `mvn jacoco:check`
+— which does not depend on reaching any lifecycle phase.
 
-`verify` also runs `package`, so the jar is still produced in the same step —
-the previously separate package step was redundant and was removed.
+### 2b. The empty-data trap — introduced by splitting the job
+
+Every stage is a **separate GitHub job on a separate runner with its own
+filesystem**. Nothing survives a job boundary.
+
+So the naive split is wrong in two different ways:
+
+| Attempt | What actually happens |
+|---|---|
+| `coverage` runs `mvn verify` | Re-runs the **entire test suite** on a fresh runner. Duplicated work on the slowest stage. |
+| `coverage` runs `mvn verify -DskipTests` | The agent never attaches, `jacoco.exec` is empty, JaCoCo measures **0%** — the gate fails correct code. |
+
+The correct split: the `test` stage **produces** the execution data, the
+`coverage` stage **grades** it.
+
+```
+test stage                                coverage stage
+  mvn test jacoco:report                    download coverage-exec-data
+  upload jacoco.exec + target/classes  -->  mvn jacoco:check
+```
+
+Both paths in the hand-off are load-bearing:
+
+- **`jacoco.exec`** — which lines were executed.
+- **`target/classes`** — the bytecode those probe ids refer to. Without it
+  JaCoCo resolves nothing and the report comes out empty.
+
+The upload uses `if-no-files-found: error`. With `warn`, a run that produced no
+coverage data would upload an empty artifact and the failure would surface **two
+jobs later** as a bogus 0%, blamed on the wrong thing.
 
 ---
 
-## 3. The thresholds, and why they are not round numbers
+## 3. Why the report is generated in the `test` stage
+
+The run where you most need to see *which* lines are uncovered is the run where
+the gate just failed.
+
+The pipeline spec schema has **no `if:` key**, so an upload step placed after
+the gate in the `coverage` stage cannot use `if: always()` — it would be skipped
+on exactly the run that needed it.
+
+So `jacoco:report` is appended to the `test` stage's command
+(`mvn test jacoco:report`) and the artifact is uploaded there, in a stage that
+does not fail on coverage. The report always exists, whatever the gate decides.
+
+---
+
+## 4. The thresholds, and why they are not round numbers
 
 ```xml
 <jacoco.line.ratio>0.90</jacoco.line.ratio>
@@ -81,7 +133,7 @@ the moment real conditional logic lands. When that happens, raise
 
 ---
 
-## 4. What is excluded, and why that is honest
+## 5. What is excluded, and why that is honest
 
 ```xml
 <exclude>xyz/royalbengal/shopfast/ShopFastApplication.class</exclude>
@@ -103,7 +155,7 @@ not by lowering the number, but by shrinking what the number measures.
 
 ---
 
-## 5. What the self-test asserts
+## 6. What the self-test asserts
 
 `scripts/verify-coverage-gate.sh` runs offline in the `security` stage:
 
@@ -114,13 +166,21 @@ not by lowering the number, but by shrinking what the number measures.
 | 3 | `haltOnFailure` is `true` | gate downgraded to a warning |
 | 4 | LINE minimum > 0 | threshold zeroed out |
 | 5 | a `<limit>` consumes `jacoco.line.ratio` | property present but unwired |
-| 6 | the pipeline runs `mvn verify`/`install` | the silent-no-op trap in §2 |
+| 6 | something runs `jacoco:check` **or** reaches `verify` | the binding trap in §2a |
 | 7 | exclusions do not cover app logic | gate hollowed by scope |
+| 8 | the exec-data hand-off exists, with `if-no-files-found: error` | the empty-data trap in §2b |
+| 9 | a report is generated and uploaded | a gate failure with nothing to diagnose from |
+
+Checks 8 and 9 only apply when the gate runs as its own job. If it is ever
+consolidated back into a single `mvn verify`, check 6 accepts that form and
+check 8 correctly skips — a guard must not refuse a *different correct* layout.
 
 It matches **structural tokens** (`<haltOnFailure>true</haltOnFailure>`, an
 anchored `mvn` command line), never prose. Both files document this gate at
 length, and a guard that matched its own explanation would pass on
-documentation alone.
+documentation alone. The exec-data paths are matched **with** their
+`application/` prefix for the same reason: the surrounding comments write them
+as `target/jacoco.exec`, so only the real `path:` entries can satisfy the check.
 
 It deliberately does **not** try to strip XML comments with `sed`. A
 `/<!--/,/-->/d` range delete is unreliable across a file with many multi-line
@@ -128,9 +188,15 @@ comments — the range can run from one comment's opener to a later comment's
 closer and silently swallow real configuration, which would make the guard fail
 a perfectly correct `pom.xml`.
 
+Check 8's `if-no-files-found` assertion is **scoped to its own artifact block**
+rather than grepped file-wide. A file-wide grep would keep passing after someone
+downgraded the exec-data upload to `warn`, because the Trivy and report uploads
+legitimately use `warn`. A guard that passes on the wrong evidence is worse than
+no guard.
+
 ---
 
-## 6. Raising the bar later
+## 7. Raising the bar later
 
 When real business logic lands (persistence, cart, checkout):
 

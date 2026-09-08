@@ -28,23 +28,36 @@ stages:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - name: Unit tests and coverage gate
+      - name: Unit tests and coverage report
         working-directory: application
         run: |
-          # `mvn verify`, NOT `mvn test`.
+          # Tests + the coverage REPORT. The coverage GATE is the next stage.
           #
-          # jacoco:check binds to the `verify` lifecycle phase. `mvn test` stops
-          # at `test`: the agent runs and jacoco.exec is written, but the check
-          # goal NEVER executes — the gate would be configured in pom.xml and
-          # enforce nothing, while the stage stayed green. That silent-no-op is
-          # the failure mode scripts/verify-coverage-gate.sh exists to catch.
+          # `mvn test` runs surefire and, because jacoco:prepare-agent binds to
+          # the default `initialize` phase, it also attaches the coverage agent
+          # and writes target/jacoco.exec. It does NOT run jacoco:check — that
+          # binds to `verify`. Intentional: this stage proves the tests pass,
+          # the coverage stage grades the result.
           #
-          # verify also runs `package`, so the jar is built here as before; the
-          # separate package step below is no longer needed.
+          # jacoco:report is appended HERE rather than in the coverage stage for
+          # a specific reason. The pipeline spec schema has no `if:` key, so an
+          # upload step in the coverage stage cannot run with if: always() — a
+          # gate FAILURE would therefore produce no report artifact, and the one
+          # run where you need to see which lines are uncovered would be the one
+          # run with nothing to look at. Generating and uploading the report in
+          # this always-green stage guarantees it exists for every run.
+          mvn -B -ntp test jacoco:report
+      - name: Build the jar
+        working-directory: application
+        run: |
+          # `mvn test` stops at the `test` phase, so it no longer packages.
+          # This keeps the compile-and-package path exercised in CI at the same
+          # point it always was. build_push builds its own jar from a clean
+          # checkout, so this is an integrity check, not the artifact source.
           #
-          # Thresholds and the exclusion rationale live in application/pom.xml
-          # (jacoco.line.ratio / jacoco.branch.ratio).
-          mvn -B -ntp verify
+          # -DskipTests: the suite already ran above; re-running it would also
+          # OVERWRITE target/jacoco.exec, which the coverage stage depends on.
+          mvn -B -ntp -DskipTests package
       - name: Upload the JaCoCo coverage report
         uses: actions/upload-artifact@v4
         with:
@@ -54,10 +67,75 @@ stages:
             application/target/site/jacoco/jacoco.xml
           retention-days: 30
           if-no-files-found: warn
+      - name: Upload coverage execution data for the coverage stage
+        uses: actions/upload-artifact@v4
+        with:
+          # THE HAND-OFF. Each stage is a separate GitHub job on its own runner
+          # with its own filesystem, so the coverage stage cannot see anything
+          # this job produced unless it is uploaded.
+          #
+          # Both paths are required and neither is optional:
+          #   jacoco.exec  — the raw execution data (which lines were hit)
+          #   classes/     — the bytecode those probe ids refer to; jacoco:check
+          #                  resolves against it and measures NOTHING without it.
+          # if-no-files-found: error — a silently missing exec file would make
+          # the gate grade an empty data set as 0% and fail correct code.
+          name: coverage-exec-data
+          path: |
+            application/target/jacoco.exec
+            application/target/classes
+          retention-days: 7
+          if-no-files-found: error
+
+  - id: coverage
+    kind: test
+    needs: [test]
+    timeout_minutes: 15
+    steps:
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Download coverage execution data from the test stage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-exec-data
+          path: application/target
+      - name: Coverage gate
+        working-directory: application
+        run: |
+          # THE GATE. A build below application/pom.xml's jacoco.line.ratio
+          # FAILS here (haltOnFailure=true). This is the whole purpose of the
+          # stage: one job, one job to fail, and its name says what broke.
+          #
+          # WHY THE GOAL DIRECTLY, and not a lifecycle phase:
+          #
+          #   `mvn verify` would re-run the ENTIRE test suite on this fresh
+          #   runner — the tests already ran in the test stage, so that is pure
+          #   duplicated work on the pipeline's slowest stage.
+          #
+          #   `mvn verify -DskipTests` is WORSE, and it is the trap this split
+          #   introduces: with tests skipped the agent never attaches, so the
+          #   gate would grade an EMPTY jacoco.exec — JaCoCo reports 0% and the
+          #   gate fails perfectly good code.
+          #
+          # Invoking jacoco:check directly grades the execution data produced by
+          # the real test run without re-running it. It reads target/jacoco.exec
+          # and target/classes, both restored from the artifact above.
+          #
+          # jacoco:report already ran in the test stage and its HTML/XML are
+          # uploaded there, so a failure here is diagnosable from the artifact
+          # of the SAME run.
+          #
+          # Thresholds and the exclusion rationale live in application/pom.xml.
+          # scripts/verify-coverage-gate.sh asserts this stage keeps its shape.
+          mvn -B -ntp jacoco:check
 
   - id: security
     kind: security
-    needs: [test]
+    needs: [coverage]
     timeout_minutes: 20
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -111,9 +189,11 @@ stages:
       - name: Verify the coverage gate actually enforces
         run: |
           # A coverage gate that is configured but never reached is
-          # indistinguishable from a passing build. This asserts the two
-          # properties that make it a gate: haltOnFailure=true in the pom, and a
-          # pipeline phase that actually reaches jacoco:check (verify, not test).
+          # indistinguishable from a passing build. This asserts the properties
+          # that make it a gate: haltOnFailure=true in the pom, a pipeline stage
+          # that actually invokes jacoco:check, and — since the gate now runs in
+          # its own job — that the stage consumes the execution data produced by
+          # the test stage. A jacoco:check with no jacoco.exec measures 0%.
           bash scripts/verify-coverage-gate.sh
       - name: Verify the GitOps manifests are fully resolved
         run: bash scripts/verify-gitops-manifests.sh

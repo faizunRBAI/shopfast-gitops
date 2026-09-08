@@ -5,19 +5,29 @@
 # WHY THIS EXISTS
 #   A coverage gate has one silent failure mode that looks exactly like a
 #   passing build: it is present in the pom, it produces a report, and it
-#   enforces NOTHING. Two independent ways to reach that state:
+#   enforces NOTHING. There are three independent ways to reach that state on
+#   this project, and this script asserts against all three:
 #
-#     1. jacoco:check binds to the `verify` phase. If the pipeline runs
-#        `mvn test`, Maven stops at `test` — prepare-agent runs, jacoco.exec is
+#     1. BINDING. jacoco:check binds to the `verify` phase. A pipeline that runs
+#        `mvn test` stops at `test` — prepare-agent runs, jacoco.exec is
 #        written, a report may even be produced, but `check` never executes.
 #        Nobody notices, because the stage is green.
 #
 #     2. haltOnFailure=false turns the gate into a warning. The threshold is
 #        still printed in the log, the build still passes below it.
 #
-#   A future edit that "simplifies" the test stage back to `mvn test`, or flips
-#   haltOnFailure, would disarm the gate without changing a single visible
-#   number. This asserts both properties so that edit fails the build instead.
+#     3. EMPTY EXECUTION DATA (new in the split layout, 2026-09-08). The gate
+#        now runs in its OWN job, on its own runner, with its own filesystem.
+#        jacoco:check with no target/jacoco.exec does not error — it grades an
+#        empty data set. That direction fails the build rather than passing it,
+#        so it is not silent; but the fix people reach for under time pressure
+#        is to lower the threshold, which IS silent from then on. So the
+#        artifact hand-off is asserted structurally here.
+#
+#   A future edit that "simplifies" the coverage stage back into `mvn test`,
+#   flips haltOnFailure, or drops the artifact hand-off would disarm the gate
+#   without changing a single visible number. This asserts those properties so
+#   that edit fails the build instead.
 #
 #   Same reasoning as verify-rollback.sh: a control is only trustworthy if the
 #   thing that makes it a control is itself tested.
@@ -30,8 +40,14 @@
 #   swallow real configuration in between, which would make this guard fail a
 #   perfectly correct pom. Instead every check matches a STRUCTURAL XML/YAML
 #   token that cannot appear in prose: a full element like
-#   <haltOnFailure>true</haltOnFailure>, or an anchored `run:` command line.
+#   <haltOnFailure>true</haltOnFailure>, or an anchored `mvn` command line.
 #   Prose mentions the words; only real configuration carries the tags.
+#
+#   Where an assertion is about ONE artifact's settings, it is scoped to that
+#   artifact's own block rather than grepped file-wide — a file-wide grep for
+#   `if-no-files-found: error` would keep passing after the exec-data upload was
+#   downgraded to `warn`, because some OTHER upload still used `error`. A guard
+#   that passes on the wrong evidence is worse than no guard.
 #
 # No network, no cluster, no Maven run — pure static assertions over the repo.
 # ---------------------------------------------------------------------------
@@ -100,18 +116,35 @@ else
   fail "no <limit> consumes jacoco.line.ratio — the threshold is not wired to a rule"
 fi
 
-# --- 6. the pipeline runs a phase that REACHES check ------------------------
-# THE BINDING TRAP: `mvn test` never runs jacoco:check.
+# --- 6. the pipeline actually INVOKES the gate ------------------------------
+# THE BINDING TRAP, restated for the split layout.
+#
+# Before 2026-09-08 the gate rode along inside `mvn verify` in the test stage,
+# and this check asserted that `mvn verify` existed. The gate now lives in its
+# own `coverage` stage which invokes the GOAL directly (`mvn jacoco:check`) so
+# that it grades the existing execution data instead of re-running the whole
+# suite on a fresh runner. So `mvn verify` is legitimately gone, and asserting
+# it would fail a correct pipeline — the exact failure mode where a guard
+# refuses correct artifacts because it outlived its assumption.
+#
+# What must remain true either way: SOME real command line runs jacoco:check,
+# or reaches a lifecycle phase (verify/install) that binds it. Accept both, so
+# a future consolidation back into `mvn verify` is not spuriously rejected.
 #
 # Anchored to a real command line (leading whitespace then `mvn`), so the long
 # explanatory comments in the spec — which necessarily contain the words
-# "mvn test" and "verify" — cannot satisfy this. A YAML comment line always has
-# `#` before any `mvn`, so requiring `mvn` at the start of the trimmed line
-# excludes prose without needing to strip comments.
-if grep -qE '^[[:space:]]*mvn( |$).*(verify|install)([[:space:]]|$)' "${SPEC}"; then
+# "mvn test", "verify" and "jacoco:check" — cannot satisfy this. A YAML comment
+# line always has `#` before any `mvn`, so requiring `mvn` at the start of the
+# trimmed line excludes prose without needing to strip comments.
+if grep -qE '^[[:space:]]*mvn( |$).*jacoco:check([[:space:]]|$)' "${SPEC}"; then
+  pass "the pipeline invokes jacoco:check directly"
+  GATE_INVOCATION="goal"
+elif grep -qE '^[[:space:]]*mvn( |$).*(verify|install)([[:space:]]|$)' "${SPEC}"; then
   pass "the pipeline runs a lifecycle phase that reaches jacoco:check"
+  GATE_INVOCATION="phase"
 else
-  fail "no 'mvn verify' (or later) command in the pipeline — jacoco:check binds to verify, so 'mvn test' would skip the gate entirely while staying green"
+  fail "no command runs jacoco:check and none reaches the verify phase — jacoco:check binds to verify, so 'mvn test' alone would skip the gate entirely while staying green"
+  GATE_INVOCATION="none"
 fi
 
 # --- 7. the exclusion list must not hide application logic ------------------
@@ -125,10 +158,85 @@ else
   pass "coverage exclusions do not hide application logic"
 fi
 
+# --- 8. the gate must receive the execution data ----------------------------
+# ONLY MEANINGFUL WHEN THE GATE RUNS AS A SEPARATE JOB (GATE_INVOCATION=goal).
+#
+# Stages are separate GitHub jobs on separate runners with separate
+# filesystems. `mvn jacoco:check` in its own job sees an EMPTY target/ unless
+# jacoco.exec AND the compiled classes are handed over as an artifact:
+#
+#   jacoco.exec  — which lines were executed
+#   classes/     — the bytecode those probe ids refer to; without it the report
+#                  and the check resolve nothing
+#
+# Deleting either side of that hand-off makes the gate measure 0% and fail every
+# build. The tempting "fix" at that point is to lower the threshold, which
+# disarms the gate permanently and silently. So assert the hand-off exists.
+#
+# The paths are matched WITH their `application/` prefix. That is deliberate:
+# the surrounding prose in the spec writes them as `target/jacoco.exec` and
+# `classes/`, so only the real `path:` entries carry the full prefix and the
+# comments cannot satisfy this check.
+#
+# If the gate is ever consolidated back into a single `mvn verify` job, the
+# hand-off is unnecessary by construction and this check correctly skips.
+if [ "${GATE_INVOCATION}" = "goal" ]; then
+  if grep -q 'name: coverage-exec-data' "${SPEC}" \
+     && grep -q 'application/target/jacoco.exec' "${SPEC}" \
+     && grep -q 'application/target/classes' "${SPEC}"; then
+    pass "execution data (jacoco.exec + classes) is handed to the coverage stage"
+  else
+    fail "the coverage stage runs jacoco:check in a separate job but no coverage-exec-data artifact carries jacoco.exec and target/classes to it — the gate would grade an EMPTY data set as 0%"
+  fi
+
+  # The exec-data upload must FAIL, not warn, when there is nothing to upload.
+  # With `warn`, a run that produced no coverage data uploads an empty artifact,
+  # the coverage job downloads nothing, and jacoco:check reports 0% — a failure
+  # two jobs downstream of the real one, blamed on the wrong thing.
+  #
+  # SCOPED to this artifact's own block: a file-wide grep would still pass after
+  # someone downgraded THIS upload to `warn`, because the trivy and report
+  # uploads legitimately use `warn`. Read the 12 lines following the artifact's
+  # name and assert within them.
+  exec_block="$(grep -A 12 'name: coverage-exec-data' "${SPEC}" | grep 'if-no-files-found:' | head -n1)"
+  case "${exec_block}" in
+    *error*)
+      pass "a missing execution-data upload fails fast rather than warning" ;;
+    "")
+      fail "the coverage-exec-data upload declares no if-no-files-found — missing execution data would surface as a bogus 0% gate failure two jobs later" ;;
+    *)
+      fail "the coverage-exec-data upload uses '${exec_block# }' instead of if-no-files-found: error — missing execution data would surface as a bogus 0% gate failure two jobs later" ;;
+  esac
+else
+  pass "gate runs in-phase; no cross-job artifact hand-off required (skipped)"
+fi
+
+# --- 9. the coverage report must survive a FAILING gate ---------------------
+# The run where you most need to know WHICH lines are uncovered is the run where
+# the gate just failed. The pipeline spec schema has no `if:` key, so an upload
+# step placed after the gate in the coverage stage cannot run with
+# if: always() — it would be skipped on exactly that run.
+#
+# So the report is generated and uploaded in the always-green test stage, which
+# is why `mvn test jacoco:report` appends the report goal there. Assert both
+# halves: something generates the report, and the artifact is declared.
+if grep -qE '^[[:space:]]*mvn( |$).*jacoco:report([[:space:]]|$)' "${SPEC}" \
+   || [ "${GATE_INVOCATION}" = "phase" ]; then
+  pass "a coverage report is generated independently of the gate"
+else
+  fail "nothing runs jacoco:report — a gate failure would report a ratio with no way to see which lines are uncovered"
+fi
+
+if grep -q 'name: jacoco-coverage-report' "${SPEC}"; then
+  pass "the coverage report is uploaded as a run artifact"
+else
+  fail "no jacoco-coverage-report artifact is uploaded — a gate failure would not be diagnosable from the run"
+fi
+
 echo
 if [ "${FAILURES}" -gt 0 ]; then
   printf '\033[1;31mCoverage gate verification FAILED (%s problem(s)).\033[0m\n' "${FAILURES}"
   exit 1
 fi
 
-printf '\033[1;32mCoverage gate verified: present, bound, halting, wired, and reached by the pipeline.\033[0m\n'
+printf '\033[1;32mCoverage gate verified: present, bound, halting, wired, fed, reported, and invoked by the pipeline.\033[0m\n'

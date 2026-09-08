@@ -46,8 +46,8 @@
 
           Unlike security.failBuildOnCVSS below (which is deliberately in
           reporting mode for a documented upstream reason), this gate BLOCKS:
-          haltOnFailure is true, and the pipeline's test stage runs `mvn verify`
-          so the check goal is actually reached.
+          haltOnFailure is true, and the pipeline's dedicated `coverage` stage
+          invokes jacoco:check so the goal is actually executed.
 
           WHY THESE NUMBERS, and not a round 0.80:
 
@@ -190,13 +190,27 @@
               COVERAGE GATE. See the jacoco.* properties above for the threshold
               rationale and the exclusion justification.
 
-              BINDING NOTE (this is the part that is easy to get wrong):
-              jacoco:check binds to the `verify` phase. `mvn test` stops at
-              `test`, which runs prepare-agent and produces jacoco.exec but
-              NEVER executes check — the gate would exist in the pom and enforce
-              nothing, silently, while the stage stayed green. The pipeline's
-              test stage therefore runs `mvn verify`, and
-              scripts/verify-coverage-gate.sh asserts that it still does.
+              HOW THE PIPELINE DRIVES THIS (easy to get wrong in two ways):
+
+              1. BINDING. jacoco:check binds to the `verify` phase. `mvn test`
+                 stops at `test`, which runs prepare-agent and produces
+                 jacoco.exec but NEVER executes check — the gate would exist in
+                 this pom and enforce nothing, silently, while the stage stayed
+                 green.
+
+              2. JOB BOUNDARIES. The gate runs in its own `coverage` stage,
+                 which is a separate CI job on a separate runner. It invokes the
+                 GOAL directly (`mvn jacoco:check`) rather than a lifecycle
+                 phase, so it grades the execution data produced by the earlier
+                 `test` stage instead of re-running the whole suite. That data
+                 crosses the job boundary as the `coverage-exec-data` artifact
+                 (jacoco.exec + target/classes); without BOTH, JaCoCo resolves
+                 nothing and reports 0%.
+
+              scripts/verify-coverage-gate.sh asserts both properties, so an
+              edit that collapses the gate back into `mvn test` or drops the
+              artifact hand-off fails the build instead of disarming the gate.
+              See docs/COVERAGE.md.
             -->
             <plugin>
                 <groupId>org.jacoco</groupId>
@@ -210,7 +224,9 @@
                     </excludes>
                 </configuration>
                 <executions>
-                    <!-- Attaches the coverage agent to the surefire JVM. -->
+                    <!-- Attaches the coverage agent to the surefire JVM. Bound
+                         to the default `initialize` phase, so it runs under
+                         `mvn test` in the test stage. -->
                     <execution>
                         <id>jacoco-prepare-agent</id>
                         <goals>
@@ -220,7 +236,16 @@
 
                     <!-- Human-readable + machine-readable reports, uploaded as a
                          CI artifact so a gate failure is diagnosable from the
-                         run itself rather than only reproducible locally. -->
+                         run itself rather than only reproducible locally.
+
+                         The test stage invokes `jacoco:report` EXPLICITLY
+                         alongside `mvn test`, because the pipeline spec has no
+                         `if:` key: an upload placed after the gate could not use
+                         if: always() and would be skipped on precisely the run
+                         that failed. Generating the report in the always-green
+                         test stage guarantees it exists for every run. The
+                         `verify` binding below is retained so a plain local
+                         `mvn verify` still produces the report. -->
                     <execution>
                         <id>jacoco-report</id>
                         <phase>verify</phase>
@@ -229,7 +254,10 @@
                         </goals>
                     </execution>
 
-                    <!-- THE GATE. haltOnFailure=true => the build FAILS. -->
+                    <!-- THE GATE. haltOnFailure=true => the build FAILS.
+                         Invoked directly as `mvn jacoco:check` by the coverage
+                         stage; the verify binding keeps a local `mvn verify`
+                         honest too. -->
                     <execution>
                         <id>jacoco-check</id>
                         <phase>verify</phase>
