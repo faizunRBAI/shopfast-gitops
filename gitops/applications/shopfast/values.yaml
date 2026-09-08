@@ -58,7 +58,20 @@ ingress:
   # WRITTEN BY CI from the ACM certificate ARN in terraform state. Must stay in
   # lockstep with the Grafana copy in gitops/monitoring/values.yaml —
   # verify-gitops-manifests.sh check 5 fails the build if they diverge.
-  certificateArn: "arn:aws:acm:us-east-1:241533126054:certificate/a305f33d-4f7c-46c6-afe1-cd4fc4ea46ac"
+  #
+  # REPOINTED 2026-09-08 (a305f33d -> faa631c6). The fix-21 rotation replaced
+  # the 2-SAN certificate with the 3-SAN one, but only two of the three
+  # hostnames followed. Read live before this edit:
+  #     argocd-server -> faa631c6
+  #     vm-grafana    -> faa631c6
+  #     shopfast      -> a305f33d   <- stale
+  # Nothing appeared broken because all three Ingresses share ALB group
+  # shopfast-platform: the listener carried BOTH certificates and SNI picked
+  # the right one per host. The danger is scripts/prune-retired-certs.sh, which
+  # deletes certificates the listeners have moved off — this stale reference
+  # was the only thing keeping the retired cert alive, and its deletion would
+  # have taken HTTPS down for this hostname alone.
+  certificateArn: "arn:aws:acm:us-east-1:241533126054:certificate/faa631c6-ce37-4718-8421-9389eddf9f01"
 
 blueGreen:
   autoPromotionEnabled: false
