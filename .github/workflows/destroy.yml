@@ -20,6 +20,35 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: hashicorp/setup-terraform@v3
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: v1.31.0
+    - name: "Release the ALB and its certificate before destroying the VPC"
+      run: "set -uo pipefail\n# The ALB, its ENIs and the EIP mapping are created by the\n\
+        # AWS Load Balancer Controller, NOT by terraform. Left in place they hold\n\
+        # the public subnets, the internet gateway and the ACM certificate, so\n\
+        # terraform destroy fails with DependencyViolation / ResourceInUseException.\n\
+        # Deleting the Ingress objects makes the controller tear the ALB down and\n\
+        # detach the certificate. Best-effort: if the cluster is already gone there\n\
+        # is nothing to release and destroy proceeds normally.\nCLUSTER=\"$(aws eks\
+        \ list-clusters --region \"${AWS_REGION}\" \\\n  --query \"clusters[?starts_with(@,\
+        \ '${TF_VAR_project_name}')] | [0]\" --output text 2>/dev/null || echo None)\"\
+        \nif [ -z \"${CLUSTER}\" ] || [ \"${CLUSTER}\" = \"None\" ]; then\n  echo \"\
+        No EKS cluster found — nothing to release.\"\n  exit 0\nfi\naws eks update-kubeconfig\
+        \ --region \"${AWS_REGION}\" --name \"${CLUSTER}\" || exit 0\nkubectl delete\
+        \ ingress --all --all-namespaces --ignore-not-found --timeout=5m || true\n\
+        echo \"Waiting for the load balancer controller to delete the ALB...\"\nfor\
+        \ i in $(seq 1 60); do\n  COUNT=\"$(aws elbv2 describe-load-balancers --region\
+        \ \"${AWS_REGION}\" \\\n    --query \"length(LoadBalancers[?VpcId!=null])\"\
+        \ --output text 2>/dev/null || echo 0)\"\n  IN_USE=\"$(aws acm list-certificates\
+        \ --region \"${AWS_REGION}\" \\\n    --query 'CertificateSummaryList[].CertificateArn'\
+        \ --output text | tr '\\t' '\\n' | while read -r a; do\n      [ -n \"$a\" ]\
+        \ || continue\n      aws acm describe-certificate --region \"${AWS_REGION}\"\
+        \ --certificate-arn \"$a\" \\\n        --query 'length(Certificate.InUseBy)'\
+        \ --output text\n    done | grep -vc '^0$' || true)\"\n  if [ \"${IN_USE:-0}\"\
+        \ = \"0\" ]; then\n    echo \"No certificate is attached any more.\"\n    break\n\
+        \  fi\n  sleep 10\ndone\n"
     - name: Terraform destroy
       working-directory: infra
       run: "set -euo pipefail\nregion=\"${AWS_REGION:-}\"\ncompat=\"\"\nif [ -n \"\
