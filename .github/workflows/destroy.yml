@@ -30,7 +30,7 @@ jobs:
     # THE BACKEND MUST BE INITIALISED BEFORE ANY `terraform output`.
     #
     # This step used to not exist. The cleanup step below reads
-    # `terraform output -raw vpc_id`, but the only `terraform init` in this
+    # `terraform output -raw vpc_id`, but the only `terraform init -reconfigure` in this
     # workflow lived in the Terraform destroy step AFTER it. So the output
     # call ran against an uninitialised backend, failed, and VPC_ID came back
     # empty — visible in the failed run as the output of the error bleeding
